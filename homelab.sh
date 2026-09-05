@@ -465,6 +465,11 @@ install_app() {
     # Sinh file compose
     echo "$compose_content" > "$HOMELAB_DIR/$app_name/docker-compose.yml"
     
+    if [ "$port" != "none" ] && [ "$port" != "host" ]; then
+        # Tự động đục lỗ an toàn ra 127.0.0.1 cho app chính để tương thích Cloudflare Systemd và aaPanel
+        sed -i "/container_name: $app_name/a \\    ports:\n      - \"127.0.0.1:$port:$port\"" "$HOMELAB_DIR/$app_name/docker-compose.yml"
+    fi
+    
     # Xử lý đặc biệt cho Home Assistant
     if [ "$app_name" == "homeassistant" ]; then
         mkdir -p "$HOMELAB_DIR/homeassistant/config"
@@ -566,7 +571,13 @@ with open("/opt/data/config.yaml", "w") as f:
     if [ "$port" != "none" ] && [ "$port" != "host" ]; then
         echo -e "⚠ Nhớ lên trang Cloudflare Tunnel và thêm Public Hostname:"
         echo -e "   Domain: ${YELLOW}$domain${NC}"
-        echo -e "   Service: ${YELLOW}http://$app_name:$port${NC}"
+        
+        # Nhận diện thông minh môi trường Cloudflare
+        if docker ps -a --format '{{.Names}}' | grep -Eq "^cloudflared$"; then
+            echo -e "   Service: ${YELLOW}http://$app_name:$port${NC}"
+        else
+            echo -e "   Service: ${YELLOW}http://127.0.0.1:$port${NC}"
+        fi
     fi
     if [ "$app_name" == "portainer" ]; then
         echo -e "⚠ CẢNH BÁO BẢO MẬT: Portainer có bộ đếm giờ tự vệ!"
