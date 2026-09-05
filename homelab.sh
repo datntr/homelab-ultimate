@@ -472,7 +472,7 @@ install_app() {
     
     # Xử lý đặc biệt cho Home Assistant
     if [ "$app_name" == "homeassistant" ]; then
-        mkdir -p "$HOMELAB_DIR/homeassistant/config"
+        mkdir -p "$HOMELAB_DIR/homeassistant/config/themes"
         if [ ! -f "$HOMELAB_DIR/homeassistant/config/configuration.yaml" ]; then
             cat << 'EOF_HA' > "$HOMELAB_DIR/homeassistant/config/configuration.yaml"
 # Loads default set of integrations. Do not remove.
@@ -493,9 +493,9 @@ http:
     - 192.168.0.0/16
     - 10.0.0.0/8
 EOF_HA
-            touch "$HOMELAB_DIR/homeassistant/config/automations.yaml"
-            touch "$HOMELAB_DIR/homeassistant/config/scripts.yaml"
-            touch "$HOMELAB_DIR/homeassistant/config/scenes.yaml"
+            echo "[]" > "$HOMELAB_DIR/homeassistant/config/automations.yaml"
+            echo "{}" > "$HOMELAB_DIR/homeassistant/config/scripts.yaml"
+            echo "[]" > "$HOMELAB_DIR/homeassistant/config/scenes.yaml"
         fi
     fi
     
@@ -605,7 +605,11 @@ with open("/opt/data/config.yaml", "w") as f:
     fi
     if [ "$app_name" == "cliproxy" ]; then
         if [ -f "$HOMELAB_DIR/cliproxy/config.yaml" ]; then
-            local m_key=$(grep "secret-key:" "$HOMELAB_DIR/cliproxy/config.yaml" | cut -d '"' -f2)
+            local m_key=$(openssl rand -hex 16)
+            sed -i 's/^[[:space:]]*secret-key:.*$/  secret-key: "'"$m_key"'"/' "$HOMELAB_DIR/cliproxy/config.yaml"
+            cd "$HOMELAB_DIR/cliproxy" && docker compose restart >/dev/null 2>&1
+            cd /
+            
             echo -e "\n🔐 ${GREEN}Khóa quản trị (Management Key) của bạn là:${NC}"
             echo -e "   - Key: ${YELLOW}$m_key${NC}"
             echo -e "Hãy lưu lại đoạn mã này! Ứng dụng sẽ tự động mã hóa nó thành chuỗi Hash (\$2a...) ngay sau khi chạy."
@@ -861,30 +865,44 @@ EOF_DOCKER
             "homeassistant")
                 case $adv_choice in
                     1)
-                        echo "Đang tự động tiêm mã bẻ khóa Proxy vào Home Assistant..."
-                        mkdir -p "$HOMELAB_DIR/homeassistant/config"
-                        cat << 'EOF_HA' > "$HOMELAB_DIR/homeassistant/config/configuration.yaml"
-# Loads default set of integrations. Do not remove.
-default_config:
+                        echo "Đang cấu hình Proxy an toàn vào file configuration.yaml..."
+                        # Tiêm cấu hình chuẩn vào file yaml mà KHÔNG làm mất dữ liệu cũ
+                        python3 -c "
+import os
+f = '$HOMELAB_DIR/homeassistant/config/configuration.yaml'
+ips = ['172.16.0.0/12', '192.168.0.0/16', '10.0.0.0/8']
+if os.path.exists(f):
+    with open(f, 'r', encoding='utf-8') as file: content = file.read()
+    if 'http:' not in content:
+        content += '\nhttp:\n  use_x_forwarded_for: true\n  trusted_proxies:\n    - 172.16.0.0/12\n    - 192.168.0.0/16\n    - 10.0.0.0/8\n'
+    else:
+        if 'use_x_forwarded_for: true' not in content: content = content.replace('http:', 'http:\n  use_x_forwarded_for: true')
+        if 'trusted_proxies:' not in content: content = content.replace('http:', 'http:\n  trusted_proxies:\n    - 172.16.0.0/12\n    - 192.168.0.0/16\n    - 10.0.0.0/8')
+        else:
+            for ip in ips:
+                if ip not in content: content = content.replace('trusted_proxies:', f'trusted_proxies:\n    - {ip}')
+    with open(f, 'w', encoding='utf-8') as file: file.write(content)
+else:
+    with open(f, 'w', encoding='utf-8') as file: file.write('http:\n  use_x_forwarded_for: true\n  trusted_proxies:\n    - 172.16.0.0/12\n    - 192.168.0.0/16\n    - 10.0.0.0/8\n')
+" 2>/dev/null || true
 
-# Load frontend themes from the themes folder
-frontend:
-  themes: !include_dir_merge_named themes
+                        # Hack trực tiếp mã nguồn lõi để trị dứt điểm bug bỏ qua trusted_proxies của bản HA 2026.9.1+
+                        echo "Đang tiêm mã nguồn bẻ khóa Proxy vào nhân hệ thống..."
+                        docker exec homeassistant python3 -c "
+import homeassistant.components.http.forwarded as fwd, os, shutil
+file_path = fwd.__file__.replace('.pyc', '.py')
+cache_dir = os.path.join(os.path.dirname(file_path), '__pycache__')
+try:
+    with open(file_path, 'r') as f: code = f.read()
+    target = ') -> None:'
+    replacement = ') -> None:\n    use_x_forwarded_for = True\n    import ipaddress; trusted_proxies = [ipaddress.ip_network(\"172.16.0.0/12\"), ipaddress.ip_network(\"192.168.0.0/16\"), ipaddress.ip_network(\"10.0.0.0/8\"), ipaddress.ip_network(\"127.0.0.1/32\")]'
+    if target in code and 'import ipaddress; trusted_proxies' not in code:
+        code = code.replace(target, replacement)
+        with open(file_path, 'w') as f: f.write(code)
+        if os.path.exists(cache_dir): shutil.rmtree(cache_dir)
+except Exception as e: pass
+" 2>/dev/null || true
 
-automation: !include automations.yaml
-script: !include scripts.yaml
-scene: !include scenes.yaml
-
-http:
-  use_x_forwarded_for: true
-  trusted_proxies:
-    - 172.16.0.0/12
-    - 192.168.0.0/16
-    - 10.0.0.0/8
-EOF_HA
-                        touch "$HOMELAB_DIR/homeassistant/config/automations.yaml"
-                        touch "$HOMELAB_DIR/homeassistant/config/scripts.yaml"
-                        touch "$HOMELAB_DIR/homeassistant/config/scenes.yaml"
                         cd "$HOMELAB_DIR/$app_name" && docker compose restart
                         print_success "Đã nạp xong cấu hình chống chặn Cloudflare!"
                         echo "Bạn hãy tải lại (F5) trang Home Assistant nhé."
@@ -1292,8 +1310,8 @@ manage_single_app() {
             fi
         fi
 
-        echo -e "\n${GREEN} 1.${NC} 📜 Xem Logs (Lịch sử hoạt động)"
-        echo -e "${GREEN} 2.${NC} 🔄 Khởi động lại (Restart)"
+        echo -e "\n${GREEN} 1.${NC} 🔄 Khởi động lại (Restart mềm - An toàn)"
+        echo -e "${YELLOW} 2.${NC} ⚠ Khởi tạo lại (Hard Reset - Tái tạo nguyên bản)"
         
         if [ "$status" -gt 0 ]; then
             echo -e "${YELLOW} 3.${NC} ⏹️ Dừng ứng dụng (Stop)"
@@ -1307,20 +1325,25 @@ manage_single_app() {
         echo -e "${CYAN} 6.${NC} 🛠️ Tiện ích mở rộng & Sửa lỗi (Advanced Tools)"
         
         echo -e "${RED} 7.${NC} 🗑 Xóa ứng dụng (Gỡ cài đặt)"
+        echo -e "${GREEN} 8.${NC} 📜 Xem Logs (Lịch sử hoạt động)"
         echo -e "${YELLOW} 0.${NC} Quay lại"
         echo ""
         read -p "Nhập lựa chọn của bạn: " act_choice
         
         case $act_choice in
             1)
-                echo "Đang hiển thị 50 dòng log gần nhất của $app_name..."
-                cd "$HOMELAB_DIR/$app_name" && docker compose logs --tail 50
+                echo "Đang khởi động lại $app_name (Restart mềm)..."
+                cd "$HOMELAB_DIR/$app_name" && docker compose restart
+                print_success "Đã khởi động lại xong!"
                 echo ""; read -p "Nhấn Enter để tiếp tục..."
                 ;;
             2)
-                echo "Đang khởi động lại $app_name..."
-                cd "$HOMELAB_DIR/$app_name" && docker compose up -d --force-recreate
-                print_success "Đã khởi động lại xong!"
+                read -p "$(echo -e "\n${RED}⚠ CẢNH BÁO: Thao tác này sẽ tái tạo lại (Force Recreate) container. Các chỉnh sửa thủ công bên trong HĐH của container sẽ bị mất! (y/N): ${NC}")" conf_recreate
+                if [[ "$conf_recreate" =~ ^[Yy]$ ]]; then
+                    echo "Đang tái tạo lại $app_name (Hard Reset)..."
+                    cd "$HOMELAB_DIR/$app_name" && docker compose up -d --force-recreate
+                    print_success "Đã tái tạo xong!"
+                fi
                 echo ""; read -p "Nhấn Enter để tiếp tục..."
                 ;;
             3)
@@ -1375,6 +1398,11 @@ manage_single_app() {
                     echo ""; read -p "Nhấn Enter để tiếp tục..."
                     return
                 fi
+                ;;
+            8)
+                echo "Đang hiển thị 50 dòng log gần nhất của $app_name..."
+                cd "$HOMELAB_DIR/$app_name" && docker compose logs --tail 50
+                echo ""; read -p "Nhấn Enter để tiếp tục..."
                 ;;
             0) return ;;
             *) print_error "Lựa chọn không hợp lệ!"; echo ""; read -p "Nhấn Enter để tiếp tục..." ;;
@@ -1558,6 +1586,21 @@ EOF
                 ;;
             2)
                 if [ -f "$HOMELAB_DIR/homeassistant/docker-compose.yml" ]; then manage_single_app "homeassistant"; continue; fi
+                
+                # Khởi tạo trước file cấu hình chứa giấy thông hành Proxy để không bị lỗi 400
+                mkdir -p "$HOMELAB_DIR/homeassistant/config"
+                cat << 'EOF2' > "$HOMELAB_DIR/homeassistant/config/configuration.yaml"
+# Loads default set of integrations. Do not remove.
+default_config:
+
+# Cho phép kết nối qua Reverse Proxy (Cloudflare Tunnel)
+http:
+  use_x_forwarded_for: true
+  trusted_proxies:
+    - 172.16.0.0/12
+    - 172.19.0.0/16
+EOF2
+
                 read -r -d '' compose << 'EOF' || true
 services:
   homeassistant:
