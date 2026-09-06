@@ -704,11 +704,41 @@ advanced_tools_menu() {
                 ;;
         esac
         
+        local current_compose="$HOMELAB_DIR/$app_name/docker-compose.yml"
+        if grep -q "network_mode: host" "$current_compose" 2>/dev/null; then
+            echo -e "${GREEN} 9.${NC} 🔄 Khôi phục Mạng Nội bộ (Đang ở chế độ Host)"
+        else
+            echo -e "${CYAN} 9.${NC} 🌐 Chuyển sang Mạng Chung (Đang ở chế độ Bridge)"
+        fi
         echo -e "${YELLOW} 0.${NC} Quay lại"
         echo ""
         read -p "Nhập lựa chọn của bạn: " adv_choice
         
         if [ "$adv_choice" == "0" ]; then break; fi
+        
+        if [ "$adv_choice" == "9" ]; then
+            local compose_file="$HOMELAB_DIR/$app_name/docker-compose.yml"
+            # Backup
+            cp "$compose_file" "${compose_file}.bak"
+            echo "Đã sao lưu cấu hình ra file ${compose_file}.bak"
+            
+            # Clean up old network configs for the service
+            sed -i '/^[[:space:]]*network_mode:.*/d' "$compose_file"
+            sed -i '/^    networks:/,/^      - homelab_net/d' "$compose_file"
+            
+            if grep -q "network_mode: host" "${compose_file}.bak"; then
+                echo "Đang khôi phục cấu hình mạng về Bridge (Zin)..."
+                sed -i '/^[[:space:]]*container_name:/a \    networks:\n      - homelab_net' "$compose_file"
+            else
+                echo "Đang chuyển cấu hình mạng sang Host..."
+                sed -i '/^[[:space:]]*container_name:/a \    network_mode: host' "$compose_file"
+            fi
+            
+            cd "$HOMELAB_DIR/$app_name" && docker compose up -d --force-recreate
+            print_success "Đã nạp lại cấu hình mạng thành công!"
+            echo ""; read -p "Nhấn Enter để tiếp tục..."
+            continue
+        fi
         
         case $app_name in
             "n8n")
@@ -789,9 +819,11 @@ COPY --from=alpine /sbin/apk /sbin/apk
 COPY --from=alpine /usr/lib/libapk.so* /usr/lib/
 EOF_DOCKER
                         if [ -n "$pkgs" ]; then
+                            echo "# Cài đặt các công cụ hệ thống (Python, FFmpeg, Đồ hoạ, v.v...)" >> Dockerfile
                             echo "RUN apk add --no-cache $pkgs" >> Dockerfile
                         fi
                         if [[ ! "$p_yt" =~ ^[Nn]$ ]]; then
+                            echo "# Cài đặt công cụ tải Video Youtube (yt-dlp)" >> Dockerfile
                             if [[ ! "$p_py" =~ ^[Nn]$ ]]; then
                                 echo "RUN pip3 install yt-dlp --break-system-packages" >> Dockerfile
                             else
@@ -799,11 +831,25 @@ EOF_DOCKER
                             fi
                         fi
                         if [[ ! "$p_pup" =~ ^[Nn]$ ]]; then
+                            echo "# Cài đặt Puppeteer, Trình duyệt ảo và các Plugin chống Bot (Stealth)" >> Dockerfile
                             echo "ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \\" >> Dockerfile
-                            echo "    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser" >> Dockerfile
-                            echo "RUN npm install -g puppeteer" >> Dockerfile
-                            # Cấp quyền cho node external command nếu cần (không bắt buộc nhưng tốt)
+                            echo "    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser \\" >> Dockerfile
+                            echo "    CHROMIUM_PATH=/usr/bin/chromium-browser" >> Dockerfile
+                            echo "RUN npm install -g puppeteer puppeteer-extra puppeteer-extra-plugin-stealth puppeteer-extra-plugin-user-preferences puppeteer-extra-plugin-user-data-dir" >> Dockerfile
+                            
+                            # Tiêm cấu hình Browserless và Quyền Node nâng cao vào docker-compose
+                            if ! grep -q "BROWSERLESS_URL" docker-compose.yml; then
+                                sed -i '/GENERIC_TIMEZONE=/a \      # ---- Custom Node.js & Execute Command Options ----\n      - BROWSERLESS_URL=ws://browserless:3000\n      - NODE_PATH=/usr/local/lib/node_modules\n      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false\n      - N8N_BLOCK_JS_SYMBOLS_ACCESS=false\n      - N8N_NODES_CAN_USE_NODE_MODULES=true\n      - N8N_CODE_EXECUTION_MODE=ownProcess\n      # ---- Quyền Filesystem ----\n      - N8N_FS_ALLOWED_PATH=/downloads,/home/node/.n8n,/tmp\n      - N8N_BLOCK_FILE_ACCESS_IN_NODES=false' docker-compose.yml
+                                sed -i '/depends_on:/a \      - browserless' docker-compose.yml
+                                sed -i '/^networks:/i \  # ========= DỊCH VỤ BROWSERLESS =========\n  browserless:\n    image: ghcr.io/browserless/chromium:latest\n    restart: unless-stopped\n    ports:\n      - "3000:3000"\n    environment:\n      - MAX_CONCURRENT_SESSIONS=10\n      - CONNECTION_TIMEOUT=600000\n    networks:\n      - homelab_net\n' docker-compose.yml
+                            fi
+                        else
+                            # Xóa cấu hình Browserless và Node.js nếu người dùng chọn không cài đặt
+                            sed -i '/# ---- Custom Node.js & Execute Command Options ----/,/- N8N_BLOCK_FILE_ACCESS_IN_NODES=false/d' docker-compose.yml
+                            sed -i '/- browserless/d' docker-compose.yml
+                            sed -i '/# ========= DỊCH VỤ BROWSERLESS =========/,/      - homelab_net/d' docker-compose.yml
                         fi
+                        echo "# Trả lại quyền cho user node mặc định và thiết lập thư mục làm việc" >> Dockerfile
                         echo "USER node" >> Dockerfile
                         echo "WORKDIR /home/node" >> Dockerfile
 
@@ -1561,6 +1607,9 @@ services:
     environment:
       - N8N_HOST=${DOMAIN}
       - WEBHOOK_URL=https://${DOMAIN}/
+      - N8N_EDITOR_BASE_URL=https://${DOMAIN}/
+      - N8N_PROXY_HOPS=1
+      - N8N_TRUSTED_PROXIES=*
       - GENERIC_TIMEZONE=Asia/Ho_Chi_Minh
       - NODES_EXCLUDE=[]
       - NODE_FUNCTION_ALLOW_EXTERNAL=*
