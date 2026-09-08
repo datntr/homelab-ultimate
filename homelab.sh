@@ -686,6 +686,10 @@ advanced_tools_menu() {
                 echo -e "${YELLOW} 1.${NC} 🧠 Cấu hình AI (API Key / Model)"
                 echo -e "${CYAN} 2.${NC} 🔑 Xem Mật khẩu"
                 echo -e "${MAGENTA} 3.${NC} 🔄 Đổi Mật khẩu"
+                echo -e "${BLUE} 4.${NC} ⚡ Chuyển đổi Chế độ hoạt động:"
+                echo -e "      • ${GREEN}All-in-one${NC} (Khuyên dùng): Chạy đồng thời Gateway (Telegram/HA) + Web Dashboard"
+                echo -e "      • ${YELLOW}Dedicated${NC} (Dashboard Only): Chỉ chạy riêng Web Dashboard (tiết kiệm tài nguyên, tắt Gateway)"
+                echo -e "${GREEN} 5.${NC} 🚀 Bật / Khởi động lại Gateway"
                 ;;
             "duplicati")
                 echo -e "${CYAN} 1.${NC} 🔑 Xem Mật khẩu"
@@ -1178,29 +1182,146 @@ except Exception as e: pass
                         ;;
                     3)
                         echo -e "🔄 ${CYAN}Đổi mật khẩu Hermes Agent${NC}"
-                        read -p "Nhập mật khẩu mới: " new_pass
+                        read -p "Nhập Mật khẩu mới: " new_pass
                         if [ -n "$new_pass" ]; then
-                            echo "Đang tạo mã băm an toàn..."
+                            echo "Đang mã hóa mật khẩu an toàn (scrypt)..."
                             docker run --rm --entrypoint python3 -v "$HOMELAB_DIR/hermes/data:/opt/data" nousresearch/hermes-agent:latest -c "
+import yaml, hashlib, secrets, base64
+
+cfg_path = '/opt/data/config.yaml'
 try:
-    from plugins.dashboard_auth.basic import hash_password
-    h = hash_password('$new_pass')
-except:
-    import bcrypt
-    h = bcrypt.hashpw(b'$new_pass', bcrypt.gensalt()).decode()
-with open('/opt/data/config.yaml', 'r') as f:
-    content = f.read()
-import re
-new_content = re.sub(r'password_hash:\s*\".*?\"', f'password_hash: \"{h}\"', content)
-with open('/opt/data/config.yaml', 'w') as f:
-    f.write(new_content)
+    with open(cfg_path, 'r', encoding='utf-8') as f:
+        cfg = yaml.safe_load(f) or {}
+except Exception:
+    cfg = {}
+
+cfg.setdefault('dashboard', {}).setdefault('basic_auth', {})
+
+salt = secrets.token_bytes(16)
+dk = hashlib.scrypt('$new_pass'.encode('utf-8'), salt=salt, n=16384, r=8, p=1, dklen=32, maxmem=0)
+pwd_hash = f'scrypt\$16384\$8\$1\${base64.b64encode(salt).decode()}\${base64.b64encode(dk).decode()}'
+cfg['dashboard']['basic_auth']['password_hash'] = pwd_hash
+cfg['dashboard']['basic_auth'].pop('password', None)
+
+with open(cfg_path, 'w', encoding='utf-8') as f:
+    yaml.dump(cfg, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
 " 2>/dev/null
                             echo "Đang khởi động lại Hermes Agent..."
                             cd "$HOMELAB_DIR/hermes" && docker compose restart
-                            print_success "Đã đổi mật khẩu thành công!"
+                            print_success "Đã đổi và mã hóa mật khẩu (scrypt) thành công!"
                         else
                             print_error "Mật khẩu không được để trống!"
                         fi
+                        echo ""; read -p "Nhấn Enter để tiếp tục..."
+                        ;;
+                    4)
+                        local compose_f="$HOMELAB_DIR/hermes/docker-compose.yml"
+                        if [ ! -f "$compose_f" ]; then
+                            print_error "Không tìm thấy file cấu hình docker-compose.yml!"
+                        else
+                            echo -e "⚡ ${CYAN}Chuyển đổi Chế độ hoạt động cho Hermes Agent${NC}"
+                            
+                            # Nhận diện trạng thái hiện tại một cách an toàn
+                            local current_mode="unknown"
+                            if grep -E "^[[:space:]]*-?[[:space:]]*HERMES_DASHBOARD=(true|1)" "$compose_f" >/dev/null 2>&1; then
+                                current_mode="allinone"
+                                echo -e "Trạng thái hiện tại: ${GREEN}Mô hình All-in-one (Chạy song song Gateway + Dashboard)${NC}"
+                                echo -e "Tùy chọn: Chuyển sang ${YELLOW}Dedicated (Chỉ chạy Web Dashboard, tắt Gateway)${NC}"
+                            elif grep -E "^[[:space:]]*command:.*dashboard" "$compose_f" >/dev/null 2>&1; then
+                                current_mode="dedicated"
+                                echo -e "Trạng thái hiện tại: ${YELLOW}Mô hình Dedicated (Chỉ chạy Dashboard, Gateway bị tắt)${NC}"
+                                echo -e "Tùy chọn: Chuyển sang ${GREEN}All-in-one (Tự chạy song song cả Gateway + Dashboard)${NC}"
+                            else
+                                echo -e "Trạng thái hiện tại: ${BLUE}Cấu hình tùy chỉnh / Chưa đặt chế độ rõ ràng${NC}"
+                                echo -e "Bạn có thể chủ động chọn chế độ muốn áp dụng:"
+                            fi
+
+                            local target_mode=""
+                            if [ "$current_mode" == "allinone" ]; then
+                                read -p "Bạn có muốn chuyển sang Dedicated không? (y/N): " c_sw
+                                [[ "$c_sw" =~ ^[Yy]$ ]] && target_mode="dedicated"
+                            elif [ "$current_mode" == "dedicated" ]; then
+                                read -p "Bạn có muốn chuyển sang All-in-one không? (y/N): " c_sw
+                                [[ "$c_sw" =~ ^[Yy]$ ]] && target_mode="allinone"
+                            else
+                                echo -e "   ${YELLOW}1.${NC} Chuyển sang All-in-one (Khuyên dùng)"
+                                echo -e "   ${YELLOW}2.${NC} Chuyển sang Dedicated (Chỉ chạy Web)"
+                                read -p "Chọn (1/2, Enter để hủy): " c_pick
+                                [ "$c_pick" == "1" ] && target_mode="allinone"
+                                [ "$c_pick" == "2" ] && target_mode="dedicated"
+                            fi
+
+                            if [ -n "$target_mode" ]; then
+                                cp "$compose_f" "${compose_f}.bak"
+                                echo "Đã sao lưu cấu hình ra file ${compose_f}.bak"
+                                python3 -c "
+import yaml
+
+compose_file = '$compose_f'
+with open(compose_file, 'r', encoding='utf-8') as f:
+    data = yaml.safe_load(f) or {}
+
+services = data.get('services', {})
+hermes = services.get('hermes', {})
+
+target = '$target_mode'
+
+# Xóa bỏ command cũ
+if 'command' in hermes:
+    del hermes['command']
+
+# Xử lý environment an toàn
+env = hermes.get('environment')
+if isinstance(env, list):
+    env = [e for e in env if not e.startswith('HERMES_DASHBOARD=') and not e.startswith('HERMES_DASHBOARD_HOST=')]
+    if env:
+        hermes['environment'] = env
+    else:
+        hermes.pop('environment', None)
+elif isinstance(env, dict):
+    env.pop('HERMES_DASHBOARD', None)
+    env.pop('HERMES_DASHBOARD_HOST', None)
+    if env:
+        hermes['environment'] = env
+    else:
+        hermes.pop('environment', None)
+
+if target == 'dedicated':
+    hermes['command'] = 'dashboard --host 0.0.0.0'
+elif target == 'allinone':
+    if isinstance(hermes.get('environment'), dict):
+        hermes['environment']['HERMES_DASHBOARD'] = 'true'
+        hermes['environment']['HERMES_DASHBOARD_HOST'] = '0.0.0.0'
+    else:
+        if 'environment' not in hermes:
+            hermes['environment'] = []
+        hermes['environment'].append('HERMES_DASHBOARD=true')
+        hermes['environment'].append('HERMES_DASHBOARD_HOST=0.0.0.0')
+
+import re
+out_yaml = yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
+out_yaml = re.sub(r'[ \t]*# \[Chế độ.*?\n', '', out_yaml)
+
+if target == 'dedicated':
+    out_yaml = re.sub(r'([ \t]*command: dashboard --host 0.0.0.0)', r'    # [Chế độ Dedicated]: Chỉ chạy Web Dashboard, tắt Messaging Gateway (tiết kiệm tài nguyên)\n\1', out_yaml)
+elif target == 'allinone':
+    out_yaml = re.sub(r'([ \t]*environment:)', r'    # [Chế độ All-in-one]: Tự động chạy song song cả Messaging Gateway (Telegram/Home Assistant) và Web Dashboard\n\1', out_yaml)
+
+with open(compose_file, 'w', encoding='utf-8') as f:
+    f.write(out_yaml)
+" 2>/dev/null
+                                cd "$HOMELAB_DIR/hermes" && docker compose up -d
+                                print_success "Đã cập nhật cấu hình và nạp lại container thành công!"
+                            fi
+                        fi
+                        echo ""; read -p "Nhấn Enter để tiếp tục..."
+                        ;;
+                    5)
+                        echo -e "🚀 ${CYAN}Đang kích hoạt Messaging Gateway...${NC}"
+                        docker exec -u hermes -e HERMES_HOME=/opt/data -e HOME=/opt/data/home -d hermes /opt/hermes/.venv/bin/hermes gateway run --no-supervise
+                        sleep 2
+                        echo -e "\n📊 ${GREEN}Trạng thái Gateway hiện tại:${NC}"
+                        docker exec -u hermes -e HERMES_HOME=/opt/data -e HOME=/opt/data/home hermes /opt/hermes/.venv/bin/hermes gateway status || true
                         echo ""; read -p "Nhấn Enter để tiếp tục..."
                         ;;
                     *) print_error "Lựa chọn không hợp lệ!"; echo ""; read -p "Nhấn Enter để tiếp tục..." ;;
@@ -1777,7 +1898,10 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hermes
     restart: unless-stopped
-    command: dashboard --host 0.0.0.0
+    # [Chế độ All-in-one]: Tự động chạy song song cả Messaging Gateway (Telegram/Home Assistant) và Web Dashboard
+    environment:
+      - HERMES_DASHBOARD=true
+      - HERMES_DASHBOARD_HOST=0.0.0.0
     env_file:
       - .env
     volumes:

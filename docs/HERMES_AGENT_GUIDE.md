@@ -44,10 +44,10 @@ Hãy chạy kịch bản `homelab.sh` > **Quản lý Ứng dụng** > **Hermes A
 
 ### Lựa chọn 1: Dùng chung với 9Router / OmniRoute (Khuyên dùng)
 Tận dụng AI miễn phí từ AI Gateway có sẵn trong hệ thống:
-- **Provider:** Chọn `OpenAI`
-- **Custom Endpoint (URL):** `http://<IP_VPS_CỦA_BẠN>:8000/v1` (Port 8000 là của 9Router/OmniRoute).
-- **API Key:** Nhập bừa (VD: `sk-homelab`).
-- **Tên Model:** Nhập tên model đã gán trong Gateway (VD: `gpt-4o`).
+- **Provider:** Chọn `custom` (Hermes nhận diện custom endpoint qua provider `custom` hoặc cấu hình base_url).
+- **Custom Endpoint (URL):** `http://9router:20128/v1` (Port 20128 nội bộ Docker) hoặc `http://<IP_VPS>:20128/v1`.
+- **API Key:** Nhập API Key từ 9Router/OmniRoute (VD: `sk-ad333ff94f...`).
+- **Tên Model:** Nhập tên model đã gán trong Gateway (VD: `gemini-3.8-flash`).
 
 ### Lựa chọn 2: Dùng Nous Portal hoặc API trực tiếp
 - **Nous Portal:** Tích hợp sẵn Tool Gateway (Firecrawl, FAL, TTS) không cần cấu hình lắt nhắt.
@@ -55,7 +55,64 @@ Tận dụng AI miễn phí từ AI Gateway có sẵn trong hệ thống:
 
 ---
 
-## 4. Ứng Dụng Thực Tế (Use Cases)
+## 4. Các Tiện Ích Mở Rộng & Quản Trị (Menu Phím 6)
+
+Kịch bản `homelab.sh` tích hợp sẵn bộ công cụ quản lý toàn diện cho Hermes Agent (vào **Quản lý Hermes Agent -> Phím 6: Tiện ích mở rộng**):
+
+| Phím | Tên tiện ích | Chức năng chi tiết |
+| :--- | :--- | :--- |
+| **1** | **🧠 Cấu hình AI** | Đổi nhanh Base URL, API Key, Model AI (9Router, OmniRoute, OpenAI, Nous Portal). |
+| **2** | **🔑 Xem Mật khẩu** | Hiển thị thông báo trạng thái bảo mật tài khoản Dashboard. |
+| **3** | **🔄 Đổi Mật khẩu** | Tự động băm (hash) mật khẩu mới bằng thuật toán **`scrypt`** chuẩn của Hermes, xóa trường lộ chữ và khởi động lại an toàn. |
+| **4** | **⚡ Chuyển đổi Chế độ** | Chuyển đổi linh hoạt giữa **All-in-one** và **Dedicated** mà không làm mất cấu hình hoặc biến môi trường khác. |
+| **5** | **🚀 Bật / Khởi động lại Gateway** | Kích hoạt Messaging Gateway (Telegram / Home Assistant) với user `hermes` và cờ `--no-supervise` nếu bị gián đoạn. |
+
+---
+
+## 5. Hai Chế Độ Hoạt Động Của Hermes (All-in-one vs Dedicated)
+
+Hermes trong Docker hỗ trợ 2 mô hình triển khai:
+
+1. 🌐 **Mô hình All-in-one (Mặc định & Khuyên dùng):**
+   - **Cách hoạt động:** Container tự động chạy song song cả **Messaging Gateway** (kết nối Telegram, Home Assistant) lẫn **Web Dashboard** (cổng 9119).
+   - **Cấu hình trong Compose:** Không dùng `command:`, khai báo biến môi trường:
+     ```yaml
+     environment:
+       - HERMES_DASHBOARD=true
+       - HERMES_DASHBOARD_HOST=0.0.0.0
+     ```
+   - **Ưu điểm:** Mỗi khi restart container hoặc khởi động lại máy chủ, bot Telegram và HA luôn tự động online cùng lúc với Web Dashboard.
+
+2. 🖥️ **Mô hình Dedicated (Dashboard Only):**
+   - **Cách hoạt động:** Chỉ khởi chạy riêng giao diện Web Dashboard, tắt hoàn toàn tiến trình Messaging Gateway.
+   - **Cấu hình trong Compose:** Gán cờ `command: dashboard --host 0.0.0.0`.
+   - **Ưu điểm:** Tiết kiệm tài nguyên RAM/CPU khi bạn chỉ muốn chat qua trình duyệt và không dùng Telegram bot hay Home Assistant.
+
+> [!TIP]
+> Bạn có thể chuyển đổi qua lại giữa 2 chế độ này bất cứ lúc nào bằng **Phím 4** trong menu Tiện ích của `homelab.sh`. Script sẽ tự động sao lưu file `docker-compose.yml.bak` trước khi thực hiện.
+
+---
+
+## 6. Lệnh Thủ Công Hữu Ích (Dành cho Quản Trị Viên)
+
+Nếu bạn thao tác qua SSH Terminal từ máy chủ Host:
+
+- **Bật Gateway nền:**
+  ```bash
+  docker exec -u hermes -e HERMES_HOME=/opt/data -e HOME=/opt/data/home -d hermes /opt/hermes/.venv/bin/hermes gateway run --no-supervise
+  ```
+- **Kiểm tra trạng thái Gateway:**
+  ```bash
+  docker exec -u hermes -e HERMES_HOME=/opt/data -e HOME=/opt/data/home hermes /opt/hermes/.venv/bin/hermes gateway status
+  ```
+- **Xem danh sách Profile:**
+  ```bash
+  docker exec -it hermes hermes profile list
+  ```
+
+---
+
+## 7. Ứng Dụng Thực Tế (Use Cases)
 
 ### A. Thư ký Telegram đa năng
 - Gửi đoạn ghi âm (Voice memo) vào Telegram lúc đang lái xe.

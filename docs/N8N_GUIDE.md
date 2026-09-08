@@ -32,3 +32,15 @@ Chạy Tiện ích số 4 để biến N8N thành siêu cỗ máy xử lý dữ 
 
 > [!WARNING]
 > Các gói cài thêm này nằm trong Container. Nếu bạn cập nhật bản N8N mới (Pull image), chúng sẽ bị mất và bạn cần chạy lại Tiện ích 4 & 2 để cài lại.
+
+---
+
+## 🔄 5. Khôi phục bản Gốc (Gỡ bỏ mọi tích hợp)
+Nếu bản build tùy chỉnh gặp lỗi hoặc bạn muốn quay về trạng thái ban đầu của N8N:
+- ⚡ **Giải pháp:** Chạy Tiện ích số 5. Script sẽ gỡ bỏ cấu hình build tùy chỉnh, xóa Dockerfile/compose build và kéo lại Image gốc từ nhà phát hành.
+
+---
+
+## 📂 6. Sửa lỗi quyền ghi file (Fix Permission Denied)
+Nếu Node Write File hoặc N8N báo lỗi không ghi được vào thư mục data (`EACCES: permission denied`):
+- 🛠️ **Giải pháp:** Chạy Tiện ích số 6. Script sẽ tự động cấp quyền `chmod -R 777` và phân quyền sở hữu `chown -R 1000:1000` cho thư mục lưu trữ của N8N.
