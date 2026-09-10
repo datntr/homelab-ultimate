@@ -1223,32 +1223,32 @@ with open(cfg_path, 'w', encoding='utf-8') as f:
                             
                             # Nhận diện trạng thái hiện tại một cách an toàn
                             local current_mode="unknown"
-                            if grep -E "^[[:space:]]*-?[[:space:]]*HERMES_DASHBOARD=(true|1)" "$compose_f" >/dev/null 2>&1; then
-                                current_mode="allinone"
-                                echo -e "Trạng thái hiện tại: ${GREEN}Mô hình All-in-one (Chạy song song Gateway + Dashboard)${NC}"
-                                echo -e "Tùy chọn: Chuyển sang ${YELLOW}Dedicated (Chỉ chạy Web Dashboard, tắt Gateway)${NC}"
-                            elif grep -E "^[[:space:]]*command:.*dashboard" "$compose_f" >/dev/null 2>&1; then
+                            if grep -E "^[[:space:]]*command:.*dashboard" "$compose_f" >/dev/null 2>&1; then
                                 current_mode="dedicated"
-                                echo -e "Trạng thái hiện tại: ${YELLOW}Mô hình Dedicated (Chỉ chạy Dashboard, Gateway bị tắt)${NC}"
-                                echo -e "Tùy chọn: Chuyển sang ${GREEN}All-in-one (Tự chạy song song cả Gateway + Dashboard)${NC}"
+                                echo -e "Trạng thái hiện tại: ${GREEN}Mô hình Dedicated (Mặc định - Chỉ chạy Web Dashboard)${NC}"
+                                echo -e "Tùy chọn: Chuyển sang ${YELLOW}All-in-one (Chạy song song cả Messaging Gateway Telegram/HA + Web Dashboard)${NC}"
+                            elif grep -E "^[[:space:]]*command:.*gateway run|^[[:space:]]*-?[[:space:]]*HERMES_DASHBOARD=(true|1)" "$compose_f" >/dev/null 2>&1; then
+                                current_mode="allinone"
+                                echo -e "Trạng thái hiện tại: ${YELLOW}Mô hình All-in-one (Chạy song song Gateway + Dashboard)${NC}"
+                                echo -e "Tùy chọn: Chuyển sang ${GREEN}Dedicated (Chỉ chạy Web Dashboard, tắt Gateway)${NC}"
                             else
                                 echo -e "Trạng thái hiện tại: ${BLUE}Cấu hình tùy chỉnh / Chưa đặt chế độ rõ ràng${NC}"
                                 echo -e "Bạn có thể chủ động chọn chế độ muốn áp dụng:"
                             fi
 
                             local target_mode=""
-                            if [ "$current_mode" == "allinone" ]; then
-                                read -p "Bạn có muốn chuyển sang Dedicated không? (y/N): " c_sw
-                                [[ "$c_sw" =~ ^[Yy]$ ]] && target_mode="dedicated"
-                            elif [ "$current_mode" == "dedicated" ]; then
-                                read -p "Bạn có muốn chuyển sang All-in-one không? (y/N): " c_sw
+                            if [ "$current_mode" == "dedicated" ]; then
+                                read -p "Bạn có muốn chuyển sang All-in-one (Gateway + Web) không? (y/N): " c_sw
                                 [[ "$c_sw" =~ ^[Yy]$ ]] && target_mode="allinone"
+                            elif [ "$current_mode" == "allinone" ]; then
+                                read -p "Bạn có muốn chuyển về Dedicated (Mặc định - Chỉ chạy Web) không? (y/N): " c_sw
+                                [[ "$c_sw" =~ ^[Yy]$ ]] && target_mode="dedicated"
                             else
-                                echo -e "   ${YELLOW}1.${NC} Chuyển sang All-in-one (Khuyên dùng)"
-                                echo -e "   ${YELLOW}2.${NC} Chuyển sang Dedicated (Chỉ chạy Web)"
+                                echo -e "   ${GREEN}1.${NC} Chuyển sang Dedicated (Mặc định - Chỉ chạy Web Dashboard)"
+                                echo -e "   ${YELLOW}2.${NC} Chuyển sang All-in-one (Chạy cả Gateway Telegram/HA + Web)"
                                 read -p "Chọn (1/2, Enter để hủy): " c_pick
-                                [ "$c_pick" == "1" ] && target_mode="allinone"
-                                [ "$c_pick" == "2" ] && target_mode="dedicated"
+                                [ "$c_pick" == "1" ] && target_mode="dedicated"
+                                [ "$c_pick" == "2" ] && target_mode="allinone"
                             fi
 
                             if [ -n "$target_mode" ]; then
@@ -1289,6 +1289,7 @@ elif isinstance(env, dict):
 if target == 'dedicated':
     hermes['command'] = 'dashboard --host 0.0.0.0'
 elif target == 'allinone':
+    hermes['command'] = 'gateway run'
     if isinstance(hermes.get('environment'), dict):
         hermes['environment']['HERMES_DASHBOARD'] = 'true'
         hermes['environment']['HERMES_DASHBOARD_HOST'] = '0.0.0.0'
@@ -1303,9 +1304,9 @@ out_yaml = yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unic
 out_yaml = re.sub(r'[ \t]*# \[Chế độ.*?\n', '', out_yaml)
 
 if target == 'dedicated':
-    out_yaml = re.sub(r'([ \t]*command: dashboard --host 0.0.0.0)', r'    # [Chế độ Dedicated]: Chỉ chạy Web Dashboard, tắt Messaging Gateway (tiết kiệm tài nguyên)\n\1', out_yaml)
+    out_yaml = re.sub(r'([ \t]*command: dashboard --host 0.0.0.0)', r'    # [Chế độ Dedicated]: Mặc định khởi chạy Web Dashboard (cổng 9119), tối ưu tài nguyên\n\1', out_yaml)
 elif target == 'allinone':
-    out_yaml = re.sub(r'([ \t]*environment:)', r'    # [Chế độ All-in-one]: Tự động chạy song song cả Messaging Gateway (Telegram/Home Assistant) và Web Dashboard\n\1', out_yaml)
+    out_yaml = re.sub(r'([ \t]*command: gateway run)', r'    # [Chế độ All-in-one]: Tự động chạy song song cả Messaging Gateway (Telegram/Home Assistant) và Web Dashboard\n\1', out_yaml)
 
 with open(compose_file, 'w', encoding='utf-8') as f:
     f.write(out_yaml)
@@ -1898,10 +1899,8 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hermes
     restart: unless-stopped
-    # [Chế độ All-in-one]: Tự động chạy song song cả Messaging Gateway (Telegram/Home Assistant) và Web Dashboard
-    environment:
-      - HERMES_DASHBOARD=true
-      - HERMES_DASHBOARD_HOST=0.0.0.0
+    # [Chế độ Dedicated]: Mặc định khởi chạy Web Dashboard (cổng 9119), tối ưu tài nguyên
+    command: dashboard --host 0.0.0.0
     env_file:
       - .env
     volumes:

@@ -69,24 +69,25 @@ Kịch bản `homelab.sh` tích hợp sẵn bộ công cụ quản lý toàn di�
 
 ---
 
-## 5. Hai Chế Độ Hoạt Động Của Hermes (All-in-one vs Dedicated)
+## 5. Hai Chế Độ Hoạt Động Của Hermes (Dedicated vs All-in-one)
 
 Hermes trong Docker hỗ trợ 2 mô hình triển khai:
 
-1. 🌐 **Mô hình All-in-one (Mặc định & Khuyên dùng):**
+1. 🖥️ **Mô hình Dedicated (Mặc định khi cài đặt - Khuyên dùng):**
+   - **Cách hoạt động:** Chỉ khởi chạy riêng giao diện Web Dashboard, tắt hoàn toàn tiến trình Messaging Gateway.
+   - **Cấu hình trong Compose:** Khai báo `command: dashboard --host 0.0.0.0`.
+   - **Ưu điểm:** Tiết kiệm tài nguyên RAM/CPU tối đa, ổn định tuyệt đối khi bạn chỉ muốn chat và quản lý qua trình duyệt Web.
+
+2. 🌐 **Mô hình All-in-one (Chạy song song cả Gateway Telegram/HA + Web):**
    - **Cách hoạt động:** Container tự động chạy song song cả **Messaging Gateway** (kết nối Telegram, Home Assistant) lẫn **Web Dashboard** (cổng 9119).
-   - **Cấu hình trong Compose:** Không dùng `command:`, khai báo biến môi trường:
+   - **Cấu hình trong Compose:** Khai báo lệnh chạy gateway và biến bật Dashboard:
      ```yaml
+     command: gateway run
      environment:
        - HERMES_DASHBOARD=true
        - HERMES_DASHBOARD_HOST=0.0.0.0
      ```
    - **Ưu điểm:** Mỗi khi restart container hoặc khởi động lại máy chủ, bot Telegram và HA luôn tự động online cùng lúc với Web Dashboard.
-
-2. 🖥️ **Mô hình Dedicated (Dashboard Only):**
-   - **Cách hoạt động:** Chỉ khởi chạy riêng giao diện Web Dashboard, tắt hoàn toàn tiến trình Messaging Gateway.
-   - **Cấu hình trong Compose:** Gán cờ `command: dashboard --host 0.0.0.0`.
-   - **Ưu điểm:** Tiết kiệm tài nguyên RAM/CPU khi bạn chỉ muốn chat qua trình duyệt và không dùng Telegram bot hay Home Assistant.
 
 > [!TIP]
 > Bạn có thể chuyển đổi qua lại giữa 2 chế độ này bất cứ lúc nào bằng **Phím 4** trong menu Tiện ích của `homelab.sh`. Script sẽ tự động sao lưu file `docker-compose.yml.bak` trước khi thực hiện.
