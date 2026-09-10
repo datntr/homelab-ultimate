@@ -87,3 +87,60 @@ docker exec -it openclaw openclaw channels add --channel telegram --token "<MÃ_
 2. Tìm đến dòng `OPENCLAW_GATEWAY_PASSWORD=admin123` và sửa `admin123` thành mật khẩu siêu khó của bạn.
 3. Bấm `Ctrl+X`, `Y`, `Enter` để lưu lại.
 4. Quay ra bấm **Phím 4 (Cập nhật / Nạp lại cấu hình)** để OpenClaw nhận mật khẩu mới.
+
+---
+
+## ⚡ 6. Tối ưu Hàng đợi & Trị lỗi Bot "Văng lỗi rồi Im bặt" (Queue & Debounce)
+
+### ⚠️ Hiện tượng & Nguyên nhân:
+- **Dấu hiệu:** Khi bạn nhắn nhiều câu ngắn dồn dập (hoặc trong nhóm chat có nhiều người/bot cùng nhắn), Telegram văng thông báo `⚠️ Agent couldn't generate a response`, sau đó bot "im bặt" không trả lời tiếp.
+- **Nguyên nhân:**
+  1. Hàng đợi mặc định là `queueMode: "steer"` (chế độ ngắt ngang). Khi tin 2 đến lúc bot đang suy nghĩ tin 1, tiến trình cũ bị hủy đột ngột làm đứt gãy context.
+  2. Không có thời gian chờ gom tin (Debounce), mỗi câu chat ngắn đều kích hoạt 1 lần gọi AI riêng biệt gây nghẽn.
+  3. Trong nhóm chat, chế độ `requireMention` đang tắt (`false`), bot tự kích hoạt với mọi tin nhắn trong nhóm dẫn đến quá tải.
+
+---
+
+### 🛠️ Hướng dẫn Khắc phục Chi tiết:
+
+#### Cách 1: Cấu hình qua Giao diện Web Control UI (Khuyên dùng - Cực dễ) 🌐
+1. Truy cập vào trang Web Control UI của OpenClaw (VD: `https://claw.yourdomain.com`).
+2. Bấm vào biểu tượng **bánh răng (Settings / Cài đặt)**.
+3. Tìm đến mục **Messages** (hoặc dùng ô tìm kiếm `debounce` / `queue`):
+   - **Inbound Debounce (ms):** Nhập `2000` *(đợi 2 giây để gom các câu chat dồn dập thành 1 lần xử lý)*.
+   - **Queue Mode:** Chuyển từ `steer` sang **`followup`** *(xử lý tuần tự từng tin, không ngắt ngang)*.
+4. Chuyển sang tab **Channels** -> chọn **Telegram**:
+   - Ở mục **Groups**, tìm tùy chọn **Require Mention** ➔ Gạt sang **Bật (ON / true)** *(chỉ khi tag `@bot` hoặc reply thì bot mới trả lời, tránh nghe trộm và quá tải trong nhóm chat)*.
+5. Bấm nút **Save** để lưu lại. Cấu hình sẽ có hiệu lực ngay lập tức!
+
+#### Cách 2: Cấu hình trực tiếp vào file `openclaw.json` (Dành cho Quản trị viên) 💻
+Mở file cấu hình trên VPS:
+```bash
+nano /opt/homelab/openclaw/data/openclaw.json
+```
+Thêm khối cấu hình `messages` và bật `requireMention: true`:
+```json
+  "messages": {
+    "inbound": {
+      "debounceMs": 2000
+    },
+    "queue": {
+      "mode": "followup"
+    }
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "groups": {
+        "*": {
+          "requireMention": true
+        }
+      }
+    }
+  }
+```
+Lưu lại (`Ctrl+O`, `Enter`, `Ctrl+X`) rồi khởi động lại OpenClaw:
+```bash
+docker restart openclaw
+```
+*(Hoặc dùng lệnh CLI: `docker exec -it openclaw openclaw config set messages.inbound.debounceMs 2000` và `docker exec -it openclaw openclaw config set messages.queue.mode followup`)*.
