@@ -1254,10 +1254,18 @@ with open(cfg_path, 'w', encoding='utf-8') as f:
                             if [ -n "$target_mode" ]; then
                                 cp "$compose_f" "${compose_f}.bak"
                                 echo "Đã sao lưu cấu hình ra file ${compose_f}.bak"
-                                python3 -c "
-import yaml
+                                
+                                local py_cmd="python3"
+                                local c_file="$compose_f"
+                                if ! python3 -c "import yaml" >/dev/null 2>&1; then
+                                    py_cmd="docker run --rm -v ${compose_f}:/compose.yml --entrypoint python3 nousresearch/hermes-agent:latest"
+                                    c_file="/compose.yml"
+                                fi
 
-compose_file = '$compose_f'
+                                $py_cmd -c "
+import yaml, re
+
+compose_file = '$c_file'
 with open(compose_file, 'r', encoding='utf-8') as f:
     data = yaml.safe_load(f) or {}
 
@@ -1286,20 +1294,26 @@ elif isinstance(env, dict):
     else:
         hermes.pop('environment', None)
 
+hermes['stdin_open'] = True
+hermes['tty'] = True
+
 if target == 'dedicated':
     hermes['command'] = 'dashboard --host 0.0.0.0'
 elif target == 'allinone':
     hermes['command'] = 'gateway run'
     if isinstance(hermes.get('environment'), dict):
+        hermes['environment']['HERMES_HOME'] = '/opt/data'
         hermes['environment']['HERMES_DASHBOARD'] = 'true'
         hermes['environment']['HERMES_DASHBOARD_HOST'] = '0.0.0.0'
     else:
-        if 'environment' not in hermes:
+        if 'environment' not in hermes or not isinstance(hermes['environment'], list):
             hermes['environment'] = []
+        # Giữ hoặc thêm HERMES_HOME
+        if not any(e.startswith('HERMES_HOME=') for e in hermes['environment']):
+            hermes['environment'].insert(0, 'HERMES_HOME=/opt/data')
         hermes['environment'].append('HERMES_DASHBOARD=true')
         hermes['environment'].append('HERMES_DASHBOARD_HOST=0.0.0.0')
 
-import re
 out_yaml = yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
 out_yaml = re.sub(r'[ \t]*# \[Chế độ.*?\n', '', out_yaml)
 
@@ -1310,9 +1324,14 @@ elif target == 'allinone':
 
 with open(compose_file, 'w', encoding='utf-8') as f:
     f.write(out_yaml)
-" 2>/dev/null
-                                cd "$HOMELAB_DIR/hermes" && docker compose up -d
-                                print_success "Đã cập nhật cấu hình và nạp lại container thành công!"
+"
+                                if [ $? -eq 0 ]; then
+                                    cd "$HOMELAB_DIR/hermes" && docker compose up -d
+                                    print_success "Đã cập nhật cấu hình và nạp lại container thành công!"
+                                else
+                                    print_error "Có lỗi khi chuyển đổi cấu hình YAML! Đang khôi phục bản sao lưu..."
+                                    cp "${compose_f}.bak" "$compose_f"
+                                fi
                             fi
                         fi
                         echo ""; read -p "Nhấn Enter để tiếp tục..."
