@@ -311,7 +311,8 @@ cloudflare_menu() {
                 echo -e "${GREEN} 4.${NC} Bật Tunnel (Start)"
             fi
             echo -e "${GREEN} 5.${NC} Khởi động lại (Restart Tunnel)"
-            echo -e "${RED} 6.${NC} Gỡ bỏ Cloudflare Tunnel"
+            echo -e "${GREEN} 6.${NC} Cập nhật phiên bản mới nhất"
+            echo -e "${RED} 7.${NC} Gỡ bỏ Cloudflare Tunnel"
         fi
         
         echo -e "${YELLOW} 0.${NC} Quay lại Menu chính"
@@ -373,6 +374,18 @@ cloudflare_menu() {
                 echo ""; read -p "Nhấn Enter để tiếp tục..."
                 ;;
             6)
+                if [ -d "$HOMELAB_DIR/cloudflared" ]; then
+                    echo "Đang kiểm tra và tải bản cập nhật mới nhất cho Cloudflare Tunnel..."
+                    cd "$HOMELAB_DIR/cloudflared"
+                    docker compose pull
+                    docker compose up -d
+                    print_success "Đã cập nhật Cloudflare Tunnel lên bản mới nhất thành công!"
+                else
+                    print_error "Cloudflare Tunnel chưa được cài đặt!"
+                fi
+                echo ""; read -p "Nhấn Enter để tiếp tục..."
+                ;;
+            7)
                 if [ -d "$HOMELAB_DIR/cloudflared" ]; then
                     read -p "$(echo -e "\n${RED}⚠ CẢNH BÁO: Xóa toàn bộ Cloudflare Tunnel? (y/N): ${NC}")" conf
                     if [[ "$conf" =~ ^[Yy]$ ]]; then

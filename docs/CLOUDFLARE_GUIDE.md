@@ -65,3 +65,19 @@ Tại trang quản lý Tunnel, chuyển qua tab **Public Hostname** -> **Add a p
 
 > [!WARNING]
 > Không nên áp dụng Access cho các API endpoint (như OpenClaw hoặc 9Router) nếu bạn định dùng chúng qua Code, vì code không thể tự nhập mã OTP. Chỉ nên dùng Access cho giao diện Web UI (như Dozzle, Portainer).
+
+---
+
+## 🔄 5. Quản lý & Cập nhật Tunnel trong homelab.sh
+
+Trong menu chính của `homelab.sh`, bạn chọn **[2] Cấu hình Cloudflare Tunnel** để truy cập bộ công cụ quản trị:
+
+| Phím | Chức năng | Chi tiết |
+| :---: | :--- | :--- |
+| **1** | **Cài đặt mới / Thay đổi Token** | Nhập hoặc thay thế Token khi tạo Tunnel mới. |
+| **2** | **Xem Log chi tiết** | Xuất 30 dòng log gần nhất để kiểm tra trạng thái kết nối (`Registered tunnel connection`). |
+| **3** | **Xem Token hiện tại** | Hiển thị token đang lưu (được che bảo mật đầu/cuối). |
+| **4** | **Dừng / Bật Tunnel** | Tạm ngắt hoặc kích hoạt lại container Tunnel. |
+| **5** | **Khởi động lại (Restart)** | Tái tạo container để khắc phục lỗi nghẽn mạng tức thời. |
+| **6** | **Cập nhật phiên bản mới nhất** | Tự động tải image `cloudflare/cloudflared:latest` mới nhất và tái nạp container (Pull & Up). |
+| **7** | **Gỡ bỏ Cloudflare Tunnel** | Dừng và xóa hoàn toàn container cùng cấu hình token. |
