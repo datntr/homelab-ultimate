@@ -720,9 +720,10 @@ advanced_tools_menu() {
             "openclaw")
                 echo -e "${CYAN} 1.${NC} 📂 Sửa lỗi quyền ghi Database (Fix Permission Denied)"
                 echo -e "${MAGENTA} 2.${NC} ⚙️ Khởi tạo Cấu hình (Fix Missing Config)"
-                echo -e "${GREEN} 3.${NC} 📱 Phê duyệt thiết bị (Approve Device)"
+                echo -e "${GREEN} 3.${NC} 📱 Phê duyệt thiết bị / Nút (Approve Device & Node)"
                 echo -e "${YELLOW} 4.${NC} 🤖 Liên kết Chatbot mạng xã hội (Telegram, Discord, WhatsApp)"
-                echo -e "${CYAN} 5.${NC} 🔑 Xem Mật khẩu"
+                echo -e "${CYAN} 5.${NC} 🔑 Xem Mật khẩu mặc định"
+                echo -e "${MAGENTA} 6.${NC} 🔄 Đổi / Reset Mật khẩu Gateway (Control UI)"
                 ;;
             "9router")
                 echo -e "${CYAN} 1.${NC} 📂 Sửa lỗi quyền ghi Database (Fix Permission Denied)"
@@ -1083,14 +1084,24 @@ except Exception as e: pass
                         echo ""; read -p "Nhấn Enter để tiếp tục..."
                         ;;
                     3)
-                        echo "Danh sách các thiết bị đang chờ phê duyệt:"
-                        docker exec openclaw openclaw devices list || true
+                        echo -e "${CYAN}=== 1. Danh sách Thiết bị (Devices) chờ duyệt ===${NC}"
+                        docker exec openclaw openclaw devices list 2>/dev/null || true
+                        echo -e "\n${CYAN}=== 2. Danh sách Quyền Nút (Nodes) chờ duyệt ===${NC}"
+                        docker exec openclaw openclaw nodes pending 2>/dev/null || true
                         echo ""
-                        read -p "Nhập mã thiết bị (Device ID) cần phê duyệt (hoặc dán nguyên cả lệnh): " dev_id
-                        if [ -n "$dev_id" ]; then
-                            dev_id=$(echo "$dev_id" | awk '{print $NF}')
-                            docker exec openclaw openclaw devices approve "$dev_id"
-                            print_success "Đã phê duyệt thiết bị thành công!"
+                        read -p "Nhập ID (hoặc dán nguyên câu lệnh từ màn hình điện thoại): " app_req
+                        if [ -n "$app_req" ]; then
+                            local req_id=$(echo "$app_req" | awk '{print $NF}')
+                            echo "Đang tiến hành phê duyệt..."
+                            if [[ "$app_req" == *"nodes"* ]]; then
+                                docker exec openclaw openclaw nodes approve "$req_id"
+                            elif [[ "$app_req" == *"devices"* ]]; then
+                                docker exec openclaw openclaw devices approve "$req_id"
+                            else
+                                docker exec openclaw openclaw nodes approve "$req_id" 2>/dev/null || docker exec openclaw openclaw devices approve "$req_id" 2>/dev/null || true
+                            fi
+                            print_success "Đã gửi lệnh phê duyệt thành công!"
+                            echo -e "${GREEN}Sếp hãy bấm nút [Tôi đã phê duyệt] trên điện thoại nhé!${NC}"
                         fi
                         echo ""; read -p "Nhấn Enter để tiếp tục..."
                         ;;
@@ -1124,9 +1135,54 @@ except Exception as e: pass
                         echo ""; read -p "Nhấn Enter để tiếp tục..."
                         ;;
                     5)
-                        echo -e "🔑 Mật khẩu mặc định của OpenClaw là: ${YELLOW}admin123${NC}"
-                        echo -e "${RED}Hiện tại OpenClaw không hỗ trợ đổi mật khẩu qua script.${NC}"
-                        echo -e "${RED}Vui lòng đổi mật khẩu trực tiếp trên giao diện Web của OpenClaw.${NC}"
+                        local cur_pass="admin123"
+                        if [ -f "$HOMELAB_DIR/openclaw/docker-compose.yml" ]; then
+                            local found_p=$(grep "OPENCLAW_GATEWAY_PASSWORD=" "$HOMELAB_DIR/openclaw/docker-compose.yml" | cut -d '=' -f2)
+                            [ -n "$found_p" ] && cur_pass="$found_p"
+                        fi
+                        echo -e "🔑 Mật khẩu hiện tại của OpenClaw Gateway: ${YELLOW}$cur_pass${NC}"
+                        echo -e "${CYAN}Để đổi mật khẩu mới, sếp hãy chọn Tùy chọn 6 nhé!${NC}"
+                        echo ""; read -p "Nhấn Enter để tiếp tục..."
+                        ;;
+                    6)
+                        echo -e "🔄 ${CYAN}Đổi mật khẩu Gateway OpenClaw (Web Control UI)${NC}"
+                        read -p "🔑 Nhập Mật khẩu mới cho OpenClaw: " new_claw_pass
+                        if [ -n "$new_claw_pass" ]; then
+                            echo "Đang cập nhật mật khẩu mới vào cấu hình..."
+                            if [ -f "$HOMELAB_DIR/openclaw/docker-compose.yml" ]; then
+                                if grep -q "OPENCLAW_GATEWAY_PASSWORD=" "$HOMELAB_DIR/openclaw/docker-compose.yml"; then
+                                    sed -i "s/OPENCLAW_GATEWAY_PASSWORD=.*/OPENCLAW_GATEWAY_PASSWORD=$new_claw_pass/" "$HOMELAB_DIR/openclaw/docker-compose.yml"
+                                else
+                                    sed -i "/image: ghcr.io\/openclaw\/openclaw/a \    environment:\n      - OPENCLAW_GATEWAY_PASSWORD=$new_claw_pass" "$HOMELAB_DIR/openclaw/docker-compose.yml"
+                                fi
+                            fi
+                            if [ -f "$HOMELAB_DIR/openclaw/data/openclaw.json" ]; then
+                                python3 -c "
+import json
+f = '$HOMELAB_DIR/openclaw/data/openclaw.json'
+try:
+    with open(f, 'r', encoding='utf-8') as fp:
+        data = json.load(fp)
+    if 'gateway' not in data:
+        data['gateway'] = {}
+    if 'auth' not in data['gateway']:
+        data['gateway']['auth'] = {}
+    data['gateway']['auth']['mode'] = 'password'
+    data['gateway']['auth']['password'] = '$new_claw_pass'
+    with open(f, 'w', encoding='utf-8') as fp:
+        json.dump(data, fp, indent=2)
+except Exception:
+    pass
+" 2>/dev/null || true
+                            fi
+                            echo "Đang khởi động lại container OpenClaw để nạp mật khẩu mới..."
+                            cd "$HOMELAB_DIR/openclaw" && docker compose up -d
+                            print_success "Đã đổi mật khẩu OpenClaw thành công!"
+                            echo -e "🔐 Mật khẩu mới của sếp là: ${YELLOW}$new_claw_pass${NC}"
+                            echo -e "Sếp hãy dùng mật khẩu này để đăng nhập Web Control UI và App nhé."
+                        else
+                            print_error "Mật khẩu không được để trống!"
+                        fi
                         echo ""; read -p "Nhấn Enter để tiếp tục..."
                         ;;
                     *) print_error "Lựa chọn không hợp lệ!"; echo ""; read -p "Nhấn Enter để tiếp tục..." ;;
