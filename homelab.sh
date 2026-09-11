@@ -295,19 +295,23 @@ cloudflare_menu() {
                 else
                     cf_status="[${GREEN}Đang chạy 🟢${NC}]"
                 fi
-                local raw_ver=$(docker exec cloudflared cloudflared --version 2>/dev/null | awk '{print $3}')
-                if [ -n "$raw_ver" ]; then
-                    cf_ver=" - v$raw_ver"
-                fi
             else
                 cf_status="[${RED}Đã dừng 🔴${NC}]"
             fi
 
-            if [ -z "$cf_ver" ] && docker inspect cloudflared >/dev/null 2>&1; then
-                local raw_ver=$(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.version"}}' cloudflared 2>/dev/null)
-                if [ -n "$raw_ver" ] && [ "$raw_ver" != "<no value>" ]; then
-                    cf_ver=" - v$raw_ver"
-                fi
+            # Trích xuất phiên bản qua nhiều cơ chế dự phòng
+            local raw_ver=$(docker logs --tail 50 cloudflared 2>&1 | grep -oE "(Version|version) [0-9]+\.[0-9]+(\.[0-9]+)?" | tail -n 1 | awk '{print $2}')
+            if [ -z "$raw_ver" ]; then
+                raw_ver=$(docker exec cloudflared cloudflared -v 2>/dev/null | grep -oE "[0-9]+\.[0-9]+(\.[0-9]+)?" | head -n 1)
+            fi
+            if [ -z "$raw_ver" ] && command -v cloudflared &>/dev/null; then
+                raw_ver=$(cloudflared -v 2>/dev/null | grep -oE "[0-9]+\.[0-9]+(\.[0-9]+)?" | head -n 1)
+            fi
+            if [ -z "$raw_ver" ]; then
+                raw_ver=$(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.version"}}' cloudflared 2>/dev/null)
+            fi
+            if [ -n "$raw_ver" ] && [ "$raw_ver" != "<no value>" ]; then
+                cf_ver=" - v$raw_ver"
             fi
         fi
 
