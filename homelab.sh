@@ -24,8 +24,9 @@ BLUE='\e[36m'     # Đổi sang Cyan để nổi bật hơn trên nền đen
 MAGENTA='\e[35m'
 NC='\e[0m' # No Color
 
-set -e
-set -o pipefail
+# Tắt set -e để menu tương tác không bị crash văng ra ngoài khi một lệnh kiểm tra trả về exit code khác 0
+set +e
+set +o pipefail
 
 # Đảm bảo thư mục gốc tồn tại
 mkdir -p "$HOMELAB_DIR"
@@ -281,13 +282,14 @@ EOF
 
 cloudflare_menu() {
     if ! check_docker; then return 0; fi
+    local cf_cached_ver=""
     while true; do
         local cf_status="[Chưa cài]"
         local cf_ver=""
         if [ -d "$HOMELAB_DIR/cloudflared" ]; then
             local is_running=$(docker inspect -f '{{.State.Running}}' cloudflared 2>/dev/null || echo "false")
             if [ "$is_running" == "true" ]; then
-                local cf_logs=$(docker logs --tail 20 cloudflared 2>&1)
+                local cf_logs=$(docker logs --tail 20 cloudflared 2>&1 || true)
                 if echo "$cf_logs" | grep -qi "invalid token"; then
                     cf_status="[${RED}Lỗi Token 🔴${NC}]"
                 elif echo "$cf_logs" | grep -q "Registered tunnel connection"; then
@@ -299,19 +301,31 @@ cloudflare_menu() {
                 cf_status="[${RED}Đã dừng 🔴${NC}]"
             fi
 
-            # Trích xuất phiên bản qua nhiều cơ chế dự phòng
-            local raw_ver=$(docker logs --tail 50 cloudflared 2>&1 | grep -oE "(Version|version) [0-9]+\.[0-9]+(\.[0-9]+)?" | tail -n 1 | awk '{print $2}')
-            if [ -z "$raw_ver" ]; then
-                raw_ver=$(docker exec cloudflared cloudflared -v 2>/dev/null | grep -oE "[0-9]+\.[0-9]+(\.[0-9]+)?" | head -n 1)
+            # Trích xuất phiên bản Cloudflare Tunnel (lưu cache để menu phản hồi tức thì)
+            if [ -z "$cf_cached_ver" ]; then
+                local raw_ver=""
+                if [ "$is_running" == "true" ]; then
+                    raw_ver=$(docker exec cloudflared cloudflared --version 2>/dev/null | grep -oE "[0-9]{4}\.[0-9]+(\.[0-9]+)?" | head -n 1 || true)
+                    if [ -z "$raw_ver" ]; then
+                        raw_ver=$(docker exec cloudflared cloudflared version 2>/dev/null | grep -oE "[0-9]{4}\.[0-9]+(\.[0-9]+)?" | head -n 1 || true)
+                    fi
+                fi
+                if [ -z "$raw_ver" ]; then
+                    raw_ver=$(docker run --rm cloudflare/cloudflared:latest --version 2>/dev/null | grep -oE "[0-9]{4}\.[0-9]+(\.[0-9]+)?" | head -n 1 || true)
+                fi
+                if [ -z "$raw_ver" ]; then
+                    raw_ver=$(docker logs cloudflared 2>&1 | head -n 50 | grep -oE "[0-9]{4}\.[0-9]+(\.[0-9]+)?" | head -n 1 || true)
+                fi
+                if [ -z "$raw_ver" ] && command -v cloudflared &>/dev/null; then
+                    raw_ver=$(cloudflared --version 2>/dev/null | grep -oE "[0-9]{4}\.[0-9]+(\.[0-9]+)?" | head -n 1 || true)
+                fi
+                if [ -n "$raw_ver" ]; then
+                    cf_cached_ver="$raw_ver"
+                fi
             fi
-            if [ -z "$raw_ver" ] && command -v cloudflared &>/dev/null; then
-                raw_ver=$(cloudflared -v 2>/dev/null | grep -oE "[0-9]+\.[0-9]+(\.[0-9]+)?" | head -n 1)
-            fi
-            if [ -z "$raw_ver" ]; then
-                raw_ver=$(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.version"}}' cloudflared 2>/dev/null)
-            fi
-            if [ -n "$raw_ver" ] && [ "$raw_ver" != "<no value>" ]; then
-                cf_ver=" - v$raw_ver"
+
+            if [ -n "$cf_cached_ver" ]; then
+                cf_ver=" - v$cf_cached_ver"
             fi
         fi
 
@@ -382,7 +396,13 @@ cloudflare_menu() {
             5)
                 if [ -d "$HOMELAB_DIR/cloudflared" ]; then
                     echo "Đang khởi động lại Cloudflare Tunnel..."
-                    cd "$HOMELAB_DIR/cloudflared" && docker compose up -d --force-recreate
+                    cd "$HOMELAB_DIR/cloudflared"
+                    if [ "$is_running" == "true" ]; then
+                        docker compose restart
+                    else
+                        docker compose up -d
+                    fi
+                    cf_cached_ver=""
                     print_success "Đã khởi động lại thành công!"
                 else
                     print_error "Cloudflare Tunnel chưa được cài đặt!"
@@ -395,6 +415,7 @@ cloudflare_menu() {
                     cd "$HOMELAB_DIR/cloudflared"
                     docker compose pull
                     docker compose up -d
+                    cf_cached_ver=""
                     print_success "Đã cập nhật Cloudflare Tunnel lên bản mới nhất thành công!"
                 else
                     print_error "Cloudflare Tunnel chưa được cài đặt!"
