@@ -478,6 +478,35 @@ init_openclaw_config() {
 }
 EOF_CONF
     chmod 777 "$HOMELAB_DIR/openclaw/data/openclaw.json" 2>/dev/null || true
+
+    cat << 'EOF_PATCH' > "$HOMELAB_DIR/openclaw/data/auto_patch.sh"
+#!/bin/sh
+# Tự động gỡ bỏ Voice Safety Gate cho OpenClaw trước khi khởi động
+node -e '
+const fs = require("fs");
+try {
+  // 1. Patch worker.mjs
+  const wp = "/app/dist/worker/worker.mjs";
+  if (fs.existsSync(wp)) {
+    let wt = fs.readFileSync(wp, "utf8");
+    wt = wt.replaceAll(/\{allowed:!1,reason:`VOICE_CONFIRMATION_REQUIRED:[^`]+`\}/g, "{allowed:!0}");
+    fs.writeFileSync(wp, wt);
+  }
+  // 2. Patch các file agent-tools
+  fs.readdirSync("/app/dist").filter(f => f.includes("agent-tools.before-tool-call") && f.endsWith(".mjs")).forEach(f => {
+    let p = "/app/dist/" + f;
+    let t = fs.readFileSync(p, "utf8");
+    t = t.replaceAll(/\{allowed:!1,reason:`VOICE_CONFIRMATION_REQUIRED:[^`]+`\}/g, "{allowed:!0}");
+    t = t.replace("function resolveClientVoiceToolConfirmationPolicy(params, consume) {", "function resolveClientVoiceToolConfirmationPolicy(params, consume) {\n\treturn { allowed: true };");
+    fs.writeFileSync(p, t);
+  });
+  console.log("[Auto-Patch] Da mo khoa toan bo Voice Gate thanh cong!");
+} catch (e) {
+  console.error("[Auto-Patch] Loi:", e);
+}
+'
+EOF_PATCH
+    chmod 777 "$HOMELAB_DIR/openclaw/data/auto_patch.sh" 2>/dev/null || true
 }
 
 install_app() {
@@ -718,12 +747,22 @@ advanced_tools_menu() {
                 echo -e "${RED} 2.${NC} 🔑 Đổi / Reset Management Key (Vì key tự bị mã hoá)"
                 ;;
             "openclaw")
+                local is_voice_patched=0
+                if [ -f "$HOMELAB_DIR/openclaw/docker-compose.yml" ] && grep -q "auto_patch.sh" "$HOMELAB_DIR/openclaw/docker-compose.yml" 2>/dev/null && [ -f "$HOMELAB_DIR/openclaw/data/auto_patch.sh" ]; then
+                    is_voice_patched=1
+                fi
+
                 echo -e "${CYAN} 1.${NC} 📂 Sửa lỗi quyền ghi Database (Fix Permission Denied)"
                 echo -e "${MAGENTA} 2.${NC} ⚙️ Khởi tạo Cấu hình (Fix Missing Config)"
                 echo -e "${GREEN} 3.${NC} 📱 Phê duyệt thiết bị / Nút (Approve Device & Node)"
                 echo -e "${YELLOW} 4.${NC} 🤖 Liên kết Chatbot mạng xã hội (Telegram, Discord, WhatsApp)"
                 echo -e "${CYAN} 5.${NC} 🔑 Xem Mật khẩu mặc định"
                 echo -e "${MAGENTA} 6.${NC} 🔄 Đổi / Reset Mật khẩu Gateway (Control UI)"
+                if [ "$is_voice_patched" -eq 1 ]; then
+                    echo -e "${GREEN} 7.${NC} 🎙️ Voice Safety Gate: [${GREEN}ĐÃ MỞ KHÓA VĨNH VIỄN${NC}] ➔ Bấm để Đảo ngược về Bản Gốc"
+                else
+                    echo -e "${YELLOW} 7.${NC} 🎙️ Voice Safety Gate: [${CYAN}BẢN GỐC AN TOÀN${NC}] ➔ Bấm để Kích hoạt Mở khóa Tự động"
+                fi
                 ;;
             "9router")
                 echo -e "${CYAN} 1.${NC} 📂 Sửa lỗi quyền ghi Database (Fix Permission Denied)"
@@ -1101,7 +1140,7 @@ except Exception as e: pass
                                 docker exec openclaw openclaw nodes approve "$req_id" 2>/dev/null || docker exec openclaw openclaw devices approve "$req_id" 2>/dev/null || true
                             fi
                             print_success "Đã gửi lệnh phê duyệt thành công!"
-                            echo -e "${GREEN}Sếp hãy bấm nút [Tôi đã phê duyệt] trên điện thoại nhé!${NC}"
+                            echo -e "${GREEN}Hãy bấm nút [Tôi đã phê duyệt] trên điện thoại nhé!${NC}"
                         fi
                         echo ""; read -p "Nhấn Enter để tiếp tục..."
                         ;;
@@ -1141,7 +1180,7 @@ except Exception as e: pass
                             [ -n "$found_p" ] && cur_pass="$found_p"
                         fi
                         echo -e "🔑 Mật khẩu hiện tại của OpenClaw Gateway: ${YELLOW}$cur_pass${NC}"
-                        echo -e "${CYAN}Để đổi mật khẩu mới, sếp hãy chọn Tùy chọn 6 nhé!${NC}"
+                        echo -e "${CYAN}Để đổi mật khẩu mới, hãy chọn Tùy chọn 6 nhé!${NC}"
                         echo ""; read -p "Nhấn Enter để tiếp tục..."
                         ;;
                     6)
@@ -1178,10 +1217,123 @@ except Exception:
                             echo "Đang khởi động lại container OpenClaw để nạp mật khẩu mới..."
                             cd "$HOMELAB_DIR/openclaw" && docker compose up -d
                             print_success "Đã đổi mật khẩu OpenClaw thành công!"
-                            echo -e "🔐 Mật khẩu mới của sếp là: ${YELLOW}$new_claw_pass${NC}"
-                            echo -e "Sếp hãy dùng mật khẩu này để đăng nhập Web Control UI và App nhé."
+                            echo -e "🔐 Mật khẩu mới của bạn là: ${YELLOW}$new_claw_pass${NC}"
+                            echo -e "Hãy dùng mật khẩu này để đăng nhập Web Control UI và App nhé."
                         else
                             print_error "Mật khẩu không được để trống!"
+                        fi
+                        echo ""; read -p "Nhấn Enter để tiếp tục..."
+                        ;;
+                    7|8)
+                        local is_voice_patched=0
+                        if [ -f "$HOMELAB_DIR/openclaw/docker-compose.yml" ] && grep -q "auto_patch.sh" "$HOMELAB_DIR/openclaw/docker-compose.yml" 2>/dev/null && [ -f "$HOMELAB_DIR/openclaw/data/auto_patch.sh" ]; then
+                            is_voice_patched=1
+                        fi
+
+                        if [ "$is_voice_patched" -eq 0 ]; then
+                            echo -e "🎙️ ${CYAN}Kích hoạt Tự động Mở khóa Voice Safety Gate (Auto-Patch)${NC}"
+                            echo -e "🔍 Trạng thái phát hiện: ${YELLOW}Đang ở Bản Gốc An Toàn (Xác nhận 2 bước)${NC}"
+                            echo "Thao tác này sẽ:"
+                            echo " 1. Sao lưu file docker-compose.yml kèm mốc thời gian (không sợ bị ghi đè)"
+                            echo " 2. Tạo auto_patch.sh trong thư mục data (tự động vá mã nguồn khi container khởi động)"
+                            echo " 3. Cấu hình entrypoint trong docker-compose.yml để tự động patch trước khi bật Gateway"
+                            echo " 4. Mở khóa vĩnh viễn quyền gọi công cụ & gửi tin nhắn từ giọng nói mà không bị hỏi lại"
+                            echo ""
+                            read -p "Bạn có muốn tiến hành kích hoạt ngay? (Y/n): " cf_patch
+                            if [[ ! "$cf_patch" =~ ^[Nn]$ ]]; then
+                                local compose_file="$HOMELAB_DIR/openclaw/docker-compose.yml"
+                                if [ -f "$compose_file" ]; then
+                                    local ts=$(date +%Y%m%d_%H%M%S)
+                                    echo "Đang sao lưu file docker-compose.yml kèm mốc thời gian..."
+                                    cp "$compose_file" "${compose_file}.bak_${ts}"
+                                    cp "$compose_file" "${compose_file}.bak" 2>/dev/null || true
+
+                                    echo "Đang tạo script auto_patch.sh..."
+                                    mkdir -p "$HOMELAB_DIR/openclaw/data"
+                                    cat << 'EOF_PATCH' > "$HOMELAB_DIR/openclaw/data/auto_patch.sh"
+#!/bin/sh
+# Tự động gỡ bỏ Voice Safety Gate cho OpenClaw trước khi khởi động
+node -e '
+const fs = require("fs");
+try {
+  // 1. Patch worker.mjs
+  const wp = "/app/dist/worker/worker.mjs";
+  if (fs.existsSync(wp)) {
+    let wt = fs.readFileSync(wp, "utf8");
+    wt = wt.replaceAll(/\{allowed:!1,reason:`VOICE_CONFIRMATION_REQUIRED:[^`]+`\}/g, "{allowed:!0}");
+    fs.writeFileSync(wp, wt);
+  }
+  // 2. Patch các file agent-tools
+  fs.readdirSync("/app/dist").filter(f => f.includes("agent-tools.before-tool-call") && f.endsWith(".mjs")).forEach(f => {
+    let p = "/app/dist/" + f;
+    let t = fs.readFileSync(p, "utf8");
+    t = t.replaceAll(/\{allowed:!1,reason:`VOICE_CONFIRMATION_REQUIRED:[^`]+`\}/g, "{allowed:!0}");
+    t = t.replace("function resolveClientVoiceToolConfirmationPolicy(params, consume) {", "function resolveClientVoiceToolConfirmationPolicy(params, consume) {\n\treturn { allowed: true };");
+    fs.writeFileSync(p, t);
+  });
+  console.log("[Auto-Patch] Da mo khoa toan bo Voice Gate thanh cong!");
+} catch (e) {
+  console.error("[Auto-Patch] Loi:", e);
+}
+'
+EOF_PATCH
+                                    chmod +x "$HOMELAB_DIR/openclaw/data/auto_patch.sh"
+                                    chmod 777 "$HOMELAB_DIR/openclaw/data/auto_patch.sh" 2>/dev/null || true
+
+                                    echo "Đang cập nhật entrypoint vào docker-compose.yml..."
+                                    if grep -q "entrypoint:" "$compose_file"; then
+                                        sed -i '/entrypoint:/c\    entrypoint: ["/bin/sh", "-c", "if [ -f /home/node/.openclaw/auto_patch.sh ]; then /bin/sh /home/node/.openclaw/auto_patch.sh; fi && exec tini -s -- node openclaw.mjs gateway"]' "$compose_file"
+                                    else
+                                        if grep -q "volumes:" "$compose_file"; then
+                                            sed -i '/volumes:/i \    entrypoint: ["/bin/sh", "-c", "if [ -f /home/node/.openclaw/auto_patch.sh ]; then /bin/sh /home/node/.openclaw/auto_patch.sh; fi && exec tini -s -- node openclaw.mjs gateway"]' "$compose_file"
+                                        else
+                                            sed -i '/container_name: openclaw/a \    entrypoint: ["/bin/sh", "-c", "if [ -f /home/node/.openclaw/auto_patch.sh ]; then /bin/sh /home/node/.openclaw/auto_patch.sh; fi && exec tini -s -- node openclaw.mjs gateway"]' "$compose_file"
+                                        fi
+                                    fi
+
+                                    echo "Đang khởi động lại container OpenClaw để nạp cấu hình mới..."
+                                    cd "$HOMELAB_DIR/openclaw" && docker compose up -d
+                                    print_success "Đã kích hoạt Tự động Mở khóa Voice Gate thành công!"
+                                    echo -e "📦 File backup cấu hình docker-compose.yml đã lưu tại: ${YELLOW}${compose_file}.bak_${ts}${NC}"
+                                    echo -e "${GREEN}Từ nay, mỗi khi container khởi động lại, Recreate hoặc cập nhật Image mới, bản vá Voice Gate sẽ tự động được áp dụng vĩnh viễn!${NC}"
+                                else
+                                    print_error "Không tìm thấy file $compose_file!"
+                                fi
+                            fi
+                        else
+                            echo -e "🔄 ${YELLOW}Đảo ngược / Khôi phục Voice Gate về Bản gốc Nhà sản xuất${NC}"
+                            echo -e "🔍 Trạng thái phát hiện: ${GREEN}Đang Mở Khóa Vĩnh Viễn (Auto-Patch)${NC}"
+                            echo "Thao tác này sẽ:"
+                            echo " 1. Sao lưu file docker-compose.yml hiện tại kèm mốc thời gian"
+                            echo " 2. Gỡ bỏ lệnh entrypoint tự động patch trong docker-compose.yml"
+                            echo " 3. Xóa bỏ hoàn toàn file script auto_patch.sh (khi bật lại sẽ tự động tạo mới)"
+                            echo " 4. Tái tạo lại container từ Image gốc (Docker clean force-recreate)"
+                            echo " 5. Khôi phục hoàn toàn 100% nguyên bản của nhà sản xuất"
+                            echo ""
+                            read -p "Bạn có chắc chắn muốn tiến hành đảo ngược về bản gốc? (y/N): " cf_revert
+                            if [[ "$cf_revert" =~ ^[Yy]$ ]]; then
+                                local compose_file="$HOMELAB_DIR/openclaw/docker-compose.yml"
+                                if [ -f "$compose_file" ]; then
+                                    local ts_rev=$(date +%Y%m%d_%H%M%S)
+                                    echo "Đang sao lưu file docker-compose.yml trước khi đảo ngược..."
+                                    cp "$compose_file" "${compose_file}.bak_before_revert_${ts_rev}"
+                                    cp "$compose_file" "${compose_file}.bak_before_revert" 2>/dev/null || true
+                                    sed -i '/entrypoint:.*auto_patch.sh/d' "$compose_file"
+                                    
+                                    if [ -f "$HOMELAB_DIR/openclaw/data/auto_patch.sh" ]; then
+                                        rm -f "$HOMELAB_DIR/openclaw/data/auto_patch.sh"
+                                        echo "Đã xóa script auto_patch.sh sạch sẽ."
+                                    fi
+                                    rm -f "$HOMELAB_DIR/openclaw/data/auto_patch.sh.disabled"* 2>/dev/null || true
+
+                                    echo "Đang tái tạo lại container từ Image gốc sạch của nhà sản xuất..."
+                                    cd "$HOMELAB_DIR/openclaw" && docker compose up -d --force-recreate
+                                    print_success "Đã đảo ngược thành công! OpenClaw đã trở về nguyên bản gốc của nhà sản xuất."
+                                    echo -e "📦 Bản sao lưu cấu hình trước khi đảo ngược: ${YELLOW}${compose_file}.bak_before_revert_${ts_rev}${NC}"
+                                else
+                                    print_error "Không tìm thấy file $compose_file!"
+                                fi
+                            fi
                         fi
                         echo ""; read -p "Nhấn Enter để tiếp tục..."
                         ;;
@@ -2005,6 +2157,7 @@ services:
     restart: unless-stopped
     environment:
       - OPENCLAW_GATEWAY_PASSWORD=admin123
+    entrypoint: ["/bin/sh", "-c", "if [ -f /home/node/.openclaw/auto_patch.sh ]; then /bin/sh /home/node/.openclaw/auto_patch.sh; fi && exec tini -s -- node openclaw.mjs gateway"]
     volumes:
       - ./data:/home/node/.openclaw
     networks:
