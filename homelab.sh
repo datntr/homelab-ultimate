@@ -283,6 +283,7 @@ cloudflare_menu() {
     if ! check_docker; then return 0; fi
     while true; do
         local cf_status="[Chưa cài]"
+        local cf_ver=""
         if [ -d "$HOMELAB_DIR/cloudflared" ]; then
             local is_running=$(docker inspect -f '{{.State.Running}}' cloudflared 2>/dev/null || echo "false")
             if [ "$is_running" == "true" ]; then
@@ -294,12 +295,23 @@ cloudflare_menu() {
                 else
                     cf_status="[${GREEN}Đang chạy 🟢${NC}]"
                 fi
+                local raw_ver=$(docker exec cloudflared cloudflared --version 2>/dev/null | awk '{print $3}')
+                if [ -n "$raw_ver" ]; then
+                    cf_ver=" - v$raw_ver"
+                fi
             else
                 cf_status="[${RED}Đã dừng 🔴${NC}]"
             fi
+
+            if [ -z "$cf_ver" ] && docker inspect cloudflared >/dev/null 2>&1; then
+                local raw_ver=$(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.version"}}' cloudflared 2>/dev/null)
+                if [ -n "$raw_ver" ] && [ "$raw_ver" != "<no value>" ]; then
+                    cf_ver=" - v$raw_ver"
+                fi
+            fi
         fi
 
-        print_section "🌐 Quản lý Cloudflare Tunnel $cf_status"
+        print_section "🌐 Quản lý Cloudflare Tunnel${cf_ver} $cf_status"
         echo -e "${GREEN} 1.${NC} Cài đặt mới / Thay đổi Token"
         
         if [ -d "$HOMELAB_DIR/cloudflared" ]; then
