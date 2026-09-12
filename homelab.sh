@@ -1704,6 +1704,74 @@ with open(compose_file, 'w', encoding='utf-8') as f:
     done
 }
 
+get_app_version() {
+    local app=$1
+    local ver=""
+    
+    # 1. Kiểm tra nhãn OCI tiêu chuẩn của Docker image (n8n, homeassistant, openclaw, 9router...)
+    ver=$(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.version"}}' "$app" 2>/dev/null)
+    if [ -z "$ver" ] || [ "$ver" == "<no value>" ]; then
+        ver=$(docker inspect -f '{{ index .Config.Labels "version"}}' "$app" 2>/dev/null)
+    fi
+    if [ -z "$ver" ] || [ "$ver" == "<no value>" ]; then
+        ver=$(docker inspect -f '{{ index .Config.Labels "org.label-schema.version"}}' "$app" 2>/dev/null)
+    fi
+    if [ -z "$ver" ] || [ "$ver" == "<no value>" ]; then
+        ver=$(docker inspect -f '{{ index .Config.Labels "build_version"}}' "$app" 2>/dev/null)
+    fi
+
+    # 2. Nếu nhãn rỗng hoặc là "latest", truy vấn phiên bản thực tế từ tiến trình/mã nguồn trong container
+    if [ -z "$ver" ] || [ "$ver" == "<no value>" ] || [ "$ver" == "latest" ]; then
+        case "$app" in
+            "hermes")
+                # Thử qua metadata python package (chuẩn pip/setuptools/poetry của hermes-agent)
+                ver=$(docker exec "$app" python3 -c "import importlib.metadata as m; dists={d.metadata['Name'].lower(): d.version for d in m.distributions()}; print(dists.get('hermes-agent') or dists.get('hermes') or '')" 2>/dev/null)
+                if [ -z "$ver" ]; then
+                    ver=$(docker exec "$app" hermes --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1)
+                fi
+                if [ -z "$ver" ]; then
+                    ver=$(docker exec "$app" python3 -c "import hermes; print(getattr(hermes, '__version__', ''))" 2>/dev/null)
+                fi
+                if [ -z "$ver" ]; then
+                    ver=$(docker exec "$app" cat /app/pyproject.toml 2>/dev/null | grep -E '^version\s*=' | head -n1 | cut -d'"' -f2)
+                fi
+                ;;
+            "cliproxy")
+                ver=$(docker exec "$app" /CLIProxyAPI/cli-proxy-api --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1)
+                if [ -z "$ver" ]; then
+                    ver=$(docker exec "$app" /cli-proxy-api -v 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1)
+                fi
+                ;;
+            "nodejs")
+                ver=$(docker exec "$app" node -v 2>/dev/null | tr -d 'v')
+                ;;
+            "dozzle")
+                ver=$(docker exec "$app" /dozzle --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1)
+                ;;
+            "uptimekuma")
+                ver=$(docker exec "$app" node -e 'console.log(require("/app/package.json").version)' 2>/dev/null)
+                ;;
+        esac
+    fi
+
+    # 3. Fallback: Lấy image tag từ docker-compose.yml
+    if [ -z "$ver" ] || [ "$ver" == "<no value>" ]; then
+        ver=$(grep "image:" "$HOMELAB_DIR/$app/docker-compose.yml" 2>/dev/null | head -n 1 | awk -F':' '{print $NF}' | tr -d '"' | tr -d ' ' | tr -d '\r\n')
+    fi
+
+    # Làm sạch chuỗi: loại bỏ tiền tố 'v' hoặc 'V' nếu có
+    ver=$(echo "$ver" | sed -E 's/^[vV]//' | tr -d '\r\n')
+
+    # Trả về kết quả định dạng
+    if [ -n "$ver" ] && [ "$ver" != "latest" ]; then
+        echo "v$ver"
+    elif [ "$ver" == "latest" ]; then
+        echo "latest"
+    else
+        echo ""
+    fi
+}
+
 manage_single_app() {
     local app_name=$1
     while true; do
@@ -1728,15 +1796,9 @@ manage_single_app() {
         local ver=""
         if [ -f "$HOMELAB_DIR/$app_name/docker-compose.yml" ]; then
             if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$app_name"; then
-                ver=$(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.version"}}' "$app_name" 2>/dev/null)
-                if [ -z "$ver" ] || [ "$ver" == "<no value>" ]; then
-                    ver=$(docker inspect -f '{{ index .Config.Labels "version"}}' "$app_name" 2>/dev/null)
-                fi
-                if [ -z "$ver" ] || [ "$ver" == "<no value>" ]; then
-                    ver=$(grep "image:" "$HOMELAB_DIR/$app_name/docker-compose.yml" | head -n 1 | awk -F':' '{print $NF}' | tr -d '"' | tr -d ' ' | tr -d '\r')
-                fi
+                ver=$(get_app_version "$app_name")
                 if [ -n "$ver" ]; then
-                    ver=" - v$ver"
+                    ver=" - $ver"
                 fi
             fi
         fi
@@ -1907,15 +1969,12 @@ app_store_menu() {
             local app=$1
             if [ -f "$HOMELAB_DIR/$app/docker-compose.yml" ]; then
                 if echo "$running_containers" | grep -qx "$app"; then
-                    local ver=$(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.version"}}' "$app" 2>/dev/null)
-                    if [ -z "$ver" ] || [ "$ver" == "<no value>" ]; then
-                        ver=$(docker inspect -f '{{ index .Config.Labels "version"}}' "$app" 2>/dev/null)
+                    local ver=$(get_app_version "$app")
+                    if [ -n "$ver" ]; then
+                        echo "[${GREEN}Đang chạy - $ver${NC}]"
+                    else
+                        echo "[${GREEN}Đang chạy${NC}]"
                     fi
-                    if [ -z "$ver" ] || [ "$ver" == "<no value>" ]; then
-                        ver=$(grep "image:" "$HOMELAB_DIR/$app/docker-compose.yml" | head -n 1 | awk -F':' '{print $NF}' | tr -d '"' | tr -d ' ' | tr -d '
-')
-                    fi
-                    echo "[${GREEN}Đang chạy - v$ver${NC}]"
                 else
                     echo "[${RED}Đã dừng${NC}]"
                 fi
