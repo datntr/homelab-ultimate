@@ -509,6 +509,120 @@ EOF_PATCH
     chmod 777 "$HOMELAB_DIR/openclaw/data/auto_patch.sh" 2>/dev/null || true
 }
 
+patch_vieneu_gradio_main() {
+    local target_file="$1"
+    if [ ! -f "$target_file" ]; then return 0; fi
+
+    # 1. Vá thông qua python3 (trên host hoặc bên trong container)
+    local py_cmd=""
+    if command -v python3 &>/dev/null; then
+        py_cmd="python3"
+    elif command -v python &>/dev/null; then
+        py_cmd="python"
+    fi
+
+    if [ -n "$py_cmd" ]; then
+        $py_cmd -c '
+import sys, re
+target = sys.argv[1]
+try:
+    with open(target, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # A. Xóa sạch các dòng auth cũ
+    lines = content.splitlines()
+    cleaned = []
+    for l in lines:
+        if "auth = [" in l:
+            continue
+        if "admin_user = os.getenv" in l or "admin_pass = os.getenv" in l:
+            continue
+        cleaned.append(l)
+    content = "\n".join(cleaned)
+    content = content.replace(", auth=auth", "")
+
+    # Đảm bảo import os có mặt
+    if "import os" not in content:
+        content = "import os\n" + content
+
+    # Chèn đoạn nạp mật khẩu từ biến môi trường
+    new_launch = """    admin_user = os.getenv("TTS_ADMIN_USER")
+    admin_pass = os.getenv("TTS_ADMIN_PASS")
+    auth = [(admin_user, admin_pass)] if (admin_user and admin_pass) else None
+    demo.queue().launch(server_name=server_name, server_port=server_port, share=share, auth=auth)"""
+    
+    content = re.sub(r"[ \t]*demo\.queue\(\)\.launch\([^\)]*\)", new_launch, content, count=1)
+
+    # B. Vá lỗi tác giả: ô "Giọng mẫu" bị rỗng khi F5 / reload trang (Persistence bug)
+    old_restore = """def restore_ui_state():
+    \"\"\"Update UI components based on persistence\"\"\"
+    global model_loaded
+    msg = get_model_status_message()
+    return (
+        msg, 
+        gr.update(interactive=model_loaded), # btn_generate
+        gr.update(interactive=model_loaded), # btn_generate_conv
+        gr.update(interactive=False)         # btn_stop
+    )"""
+
+    new_restore = """def restore_ui_state():
+    \"\"\"Update UI components based on persistence\"\"\"
+    global model_loaded, tts, PRESET_VOICES_CACHE
+    msg = get_model_status_message()
+    voice_update = gr.update()
+    if model_loaded and tts is not None:
+        try:
+            voices = PRESET_VOICES_CACHE if PRESET_VOICES_CACHE else tts.list_preset_voices()
+        except Exception:
+            voices = []
+        if voices:
+            default_v = getattr(tts, "_default_voice", None)
+            is_tuple = (len(voices) > 0 and isinstance(voices[0], tuple))
+            voice_values = [v[1] for v in voices] if is_tuple else voices
+            if not default_v and voice_values:
+                default_v = voice_values[0]
+            voice_update = gr.update(choices=voices, value=default_v, interactive=True)
+    return (
+        msg, 
+        gr.update(interactive=model_loaded), # btn_generate
+        gr.update(interactive=model_loaded), # btn_generate_conv
+        gr.update(interactive=False),        # btn_stop
+        voice_update                         # voice_select
+    )"""
+
+    if old_restore in content:
+        content = content.replace(old_restore, new_restore)
+        content = content.replace(
+            "outputs=[model_status, btn_generate, btn_generate_conv, btn_stop]",
+            "outputs=[model_status, btn_generate, btn_generate_conv, btn_stop, voice_select]"
+        )
+
+    with open(target, "w", encoding="utf-8") as f:
+        f.write(content)
+except Exception:
+    pass
+' "$target_file" 2>/dev/null || true
+    fi
+
+    # 2. Fallback sed nếu python chưa chèn được auth
+    if ! grep -q "TTS_ADMIN_USER" "$target_file" 2>/dev/null; then
+        sed -i '/auth = \[/d' "$target_file" 2>/dev/null || true
+        sed -i '/admin_user = os.getenv/d' "$target_file" 2>/dev/null || true
+        sed -i '/admin_pass = os.getenv/d' "$target_file" 2>/dev/null || true
+        sed -i 's/, auth=auth//' "$target_file" 2>/dev/null || true
+        if ! grep -q "^import os" "$target_file" 2>/dev/null; then
+            sed -i '1i import os' "$target_file" 2>/dev/null || true
+        fi
+        sed -i '/demo\.queue()\.launch/i \    admin_user = os.getenv("TTS_ADMIN_USER")\n    admin_pass = os.getenv("TTS_ADMIN_PASS")\n    auth = [(admin_user, admin_pass)] if (admin_user and admin_pass) else None' "$target_file" 2>/dev/null || true
+        sed -i 's/share=share)/share=share, auth=auth)/' "$target_file" 2>/dev/null || true
+    fi
+
+    # 3. Đồng bộ trực tiếp vào container đang chạy (nếu có)
+    if docker ps -q -f "name=^vieneu-tts$" 2>/dev/null | grep -q .; then
+        docker cp "$target_file" vieneu-tts:/workspace/apps/gradio_main.py 2>/dev/null || true
+    fi
+}
+
 install_app() {
     local app_name=$1
     local port=$2
@@ -611,11 +725,78 @@ remote-management:
 EOF_CLI
         fi
     fi
+
+    if [ "$app_name" == "vieneu-tts" ]; then
+        echo "Đang chuẩn bị môi trường cài đặt cho VieNeu-TTS..."
+        mkdir -p "$HOMELAB_DIR/vieneu-tts"
+        if [ ! -d "$HOMELAB_DIR/vieneu-tts/app" ]; then
+            echo "Đang tải mã nguồn VieNeu-TTS từ GitHub..."
+            git clone --depth 1 https://github.com/pnnbao97/VieNeu-TTS.git "$HOMELAB_DIR/vieneu-tts/app"
+        fi
+        # Vá lỗi thiếu thư mục examples trong Dockerfile.cpu gốc của tác giả
+        if [ -f "$HOMELAB_DIR/vieneu-tts/app/docker/Dockerfile.cpu" ]; then
+            sed -i 's|examples/audio_ref/ examples/audio_ref/|examples/ examples/|' "$HOMELAB_DIR/vieneu-tts/app/docker/Dockerfile.cpu" 2>/dev/null || true
+        fi
+        # Chuẩn bị sẵn cơ chế xác thực thông minh qua biến môi trường (.env)
+        patch_vieneu_gradio_main "$HOMELAB_DIR/vieneu-tts/app/apps/gradio_main.py"
+        mkdir -p "$HOMELAB_DIR/vieneu-tts/data/hf_cache"
+        mkdir -p "$HOMELAB_DIR/vieneu-tts/data/output_audio"
+        mkdir -p "$HOMELAB_DIR/vieneu-tts/data/user_voices"
+        chmod -R 777 "$HOMELAB_DIR/vieneu-tts/data" 2>/dev/null || true
+    fi
+
+    if [ "$app_name" == "beszel" ]; then
+        echo "Đang chuẩn bị môi trường cho Beszel (Hub & Agent)..."
+        mkdir -p "$HOMELAB_DIR/beszel/data/beszel_data"
+        mkdir -p "$HOMELAB_DIR/beszel/data/beszel_agent_data"
+        mkdir -p "$HOMELAB_DIR/beszel/data/beszel_socket"
+        
+        # Tự động tạo cặp khóa SSH Ed25519 cho Hub và Agent nếu chưa có
+        if [ ! -f "$HOMELAB_DIR/beszel/data/beszel_data/id_ed25519" ]; then
+            echo "Đang tự động khởi tạo cặp khóa ED25519 bảo mật cho Beszel..."
+            ssh-keygen -t ed25519 -N "" -f "$HOMELAB_DIR/beszel/data/beszel_data/id_ed25519" 2>/dev/null || true
+            chmod 600 "$HOMELAB_DIR/beszel/data/beszel_data/id_ed25519" 2>/dev/null || true
+        fi
+
+        local b_key=""
+        if [ -f "$HOMELAB_DIR/beszel/data/beszel_data/id_ed25519.pub" ]; then
+            b_key=$(cat "$HOMELAB_DIR/beszel/data/beszel_data/id_ed25519.pub" | tr -d '\r\n')
+        fi
+
+        touch "$HOMELAB_DIR/beszel/.env"
+        if [ -n "$domain" ]; then
+            if ! grep -q "^APP_URL=" "$HOMELAB_DIR/beszel/.env" 2>/dev/null; then
+                echo "APP_URL=https://$domain" >> "$HOMELAB_DIR/beszel/.env"
+            fi
+        fi
+        if ! grep -q "^USER_EMAIL=" "$HOMELAB_DIR/beszel/.env" 2>/dev/null; then
+            echo "USER_EMAIL=admin@homelab.local" >> "$HOMELAB_DIR/beszel/.env"
+        fi
+        if ! grep -q "^USER_PASSWORD=" "$HOMELAB_DIR/beszel/.env" 2>/dev/null; then
+            echo "USER_PASSWORD=admin123" >> "$HOMELAB_DIR/beszel/.env"
+        fi
+        if grep -q "^BESZEL_KEY=$" "$HOMELAB_DIR/beszel/.env" 2>/dev/null || ! grep -q "^BESZEL_KEY=" "$HOMELAB_DIR/beszel/.env" 2>/dev/null; then
+            sed -i '/^BESZEL_KEY=/d' "$HOMELAB_DIR/beszel/.env" 2>/dev/null || true
+            echo "BESZEL_KEY=\"$b_key\"" >> "$HOMELAB_DIR/beszel/.env"
+        fi
+        if grep -q "^KEY=$" "$HOMELAB_DIR/beszel/.env" 2>/dev/null || ! grep -q "^KEY=" "$HOMELAB_DIR/beszel/.env" 2>/dev/null; then
+            sed -i '/^KEY=/d' "$HOMELAB_DIR/beszel/.env" 2>/dev/null || true
+            echo "KEY=\"$b_key\"" >> "$HOMELAB_DIR/beszel/.env"
+        fi
+        chmod -R 777 "$HOMELAB_DIR/beszel/data" 2>/dev/null || true
+        chmod 600 "$HOMELAB_DIR/beszel/data/beszel_data/id_ed25519" 2>/dev/null || true
+        chmod 777 "$HOMELAB_DIR/beszel/data/beszel_socket" 2>/dev/null || true
+    fi
     
     # Bật app
     echo "Đang khởi tạo $app_name (Kéo bản mới nhất)..."
     cd "$HOMELAB_DIR/$app_name"
-    docker compose pull
+    if [ "$app_name" == "vieneu-tts" ]; then
+        echo "Đang đóng gói Image VieNeu-TTS (CPU ONNX siêu nhẹ)..."
+        docker compose build
+    else
+        docker compose pull
+    fi
 
     # Hermes Agent: Tạo config SAU KHI image đã tải xong (cần dùng chính image đó để hash mật khẩu)
     if [ "$app_name" == "hermes" ]; then
@@ -637,7 +818,7 @@ with open("/opt/data/config.yaml", "w") as f:
         fi
     fi
 
-    docker compose up -d
+    docker compose up -d --force-recreate
     
     # Xử lý tự động phân quyền (Fix Permission Denied) ngay sau khi cài
     echo "Đang tự động xử lý quyền thư mục..."
@@ -645,6 +826,10 @@ with open("/opt/data/config.yaml", "w") as f:
     # Thử gọi lệnh chmod 777 bên trong container (nhắm tới các path phổ biến)
     docker exec --user root "$app_name" chmod -R 777 /app/data /home/node/.openclaw 2>/dev/null || true
     docker exec --user root "$app_name" chown -R 1000:1000 /app/data /home/node/.openclaw 2>/dev/null || true
+    if [ "$app_name" == "vieneu-tts" ]; then
+        docker exec --user root "$app_name" chown -R 1000:1000 /home/app/.cache /workspace/output_audio /home/app/.vieneu 2>/dev/null || true
+        docker exec --user root "$app_name" chmod -R 777 /workspace/output_audio /home/app/.vieneu 2>/dev/null || true
+    fi
 
     print_success "Cài đặt $app_name thành công!"
     if [ "$port" != "none" ] && [ "$port" != "host" ]; then
@@ -674,9 +859,26 @@ with open("/opt/data/config.yaml", "w") as f:
             echo "Hãy lưu lại thông tin này nhé!"
         fi
     fi
+    if [ "$app_name" == "beszel" ]; then
+        local b_email="admin@homelab.local"
+        local b_pass="admin123"
+        if [ -f "$HOMELAB_DIR/beszel/.env" ]; then
+            local env_e=$(grep "^USER_EMAIL=" "$HOMELAB_DIR/beszel/.env" 2>/dev/null | cut -d '=' -f2)
+            local env_p=$(grep "^USER_PASSWORD=" "$HOMELAB_DIR/beszel/.env" 2>/dev/null | cut -d '=' -f2)
+            [ -n "$env_e" ] && b_email="$env_e"
+            [ -n "$env_p" ] && b_pass="$env_p"
+        fi
+        echo -e "\n🔐 ${GREEN}Tài khoản đăng nhập Beszel Dashboard của bạn:${NC}"
+        echo -e "   - Email:    ${YELLOW}$b_email${NC}"
+        echo -e "   - Mật khẩu: ${YELLOW}$b_pass${NC}"
+        echo -e "💡 ${CYAN}Đã tự động khởi chạy Beszel Agent trên máy chủ này!${NC}"
+        echo -e "   Khi vào WebUI, bấm nút ${GREEN}Thêm Hệ thống${NC} (Add System):"
+        echo -e "   - Tên: ${YELLOW}HomeLab${NC}"
+        echo -e "   - Máy chủ / IP: ${YELLOW}/beszel_socket/beszel.sock${NC} (Unix socket siêu mượt, không lo chặn port)"
+    fi
     if [[ "$app_name" == "9router" || "$app_name" == "openclaw" || "$app_name" == "duplicati" || "$app_name" == "hermes" ]]; then
         echo -e "\n🔐 ${GREEN}Tài khoản đăng nhập mặc định của $app_name:${NC}"
-        if [ "$app_name" == "hermes" ]; then
+        if [[ "$app_name" == "hermes" ]]; then
             echo -e "   - Username: ${CYAN}admin${NC}"
         fi
         echo -e "   - Password: ${CYAN}admin123${NC}"
@@ -781,6 +983,31 @@ advanced_tools_menu() {
                 echo -e "      • ${YELLOW}Dedicated${NC} (Dashboard Only): Chỉ chạy riêng Web Dashboard (tiết kiệm tài nguyên, tắt Gateway)"
                 echo -e "${GREEN} 5.${NC} 🚀 Bật / Khởi động lại Gateway"
                 ;;
+            "vieneu-tts")
+                local cur_u=""
+                local cur_p=""
+                if [ -f "$HOMELAB_DIR/vieneu-tts/.env" ]; then
+                    cur_u=$(grep "^TTS_ADMIN_USER=" "$HOMELAB_DIR/vieneu-tts/.env" 2>/dev/null | cut -d '=' -f2- | tr -d '"' | tr -d "'")
+                    cur_p=$(grep "^TTS_ADMIN_PASS=" "$HOMELAB_DIR/vieneu-tts/.env" 2>/dev/null | cut -d '=' -f2- | tr -d '"' | tr -d "'")
+                fi
+
+                local is_vieneu_auth=0
+                if [ -n "$cur_u" ] && [ -n "$cur_p" ]; then
+                    is_vieneu_auth=1
+                fi
+
+                if [ "$is_vieneu_auth" -eq 1 ]; then
+                    echo -e "${GREEN} 1.${NC} 🛡️ Xác thực đăng nhập: [${GREEN}ĐANG BẬT BẢO VỆ${NC}] ➔ Bấm để TẮT (Vào thẳng)"
+                    echo -e "${CYAN} 2.${NC} 🔑 Xem Tài khoản & Mật khẩu hiện tại"
+                    echo -e "${MAGENTA} 3.${NC} 🔄 Đổi Tài khoản / Mật khẩu"
+                    echo -e "${CYAN} 4.${NC} 📂 Sửa lỗi quyền ghi Cache & Audio (Fix Permission Denied)"
+                    echo -e "${YELLOW} 5.${NC} 🧹 Dọn dẹp bộ nhớ đệm Hugging Face Cache (Giải phóng ổ cứng)"
+                else
+                    echo -e "${YELLOW} 1.${NC} 🛡️ Xác thực đăng nhập: [${RED}ĐANG TẮT - VÀO THẲNG${NC}] ➔ Bấm để BẬT BẢO VỆ"
+                    echo -e "${CYAN} 2.${NC} 📂 Sửa lỗi quyền ghi Cache & Audio (Fix Permission Denied)"
+                    echo -e "${YELLOW} 3.${NC} 🧹 Dọn dẹp bộ nhớ đệm Hugging Face Cache (Giải phóng ổ cứng)"
+                fi
+                ;;
             "duplicati")
                 echo -e "${CYAN} 1.${NC} 🔑 Xem Mật khẩu"
                 echo -e "${MAGENTA} 2.${NC} 🔄 Đổi Mật khẩu"
@@ -792,6 +1019,12 @@ advanced_tools_menu() {
             "redis-core")
                 echo -e "${CYAN} 1.${NC} 🔑 Xem thông tin kết nối Redis"
                 echo -e "${MAGENTA} 2.${NC} 🔄 Đổi Mật khẩu Redis"
+                ;;
+            "beszel")
+                echo -e "${CYAN} 1.${NC} 🔑 Xem Tài khoản & Mật khẩu đăng nhập"
+                echo -e "${MAGENTA} 2.${NC} 🔄 Đổi Mật khẩu"
+                echo -e "${CYAN} 3.${NC} 🛡️ Xem Public Key của Agent (Dùng kết nối máy chủ)"
+                echo -e "${GREEN} 4.${NC} 📖 Hướng dẫn Kết nối Máy chủ (Add System Guide)"
                 ;;
             *)
                 echo -e "Không có tiện ích mở rộng nào cho ứng dụng này."
@@ -1697,6 +1930,266 @@ with open(compose_file, 'w', encoding='utf-8') as f:
                     *) print_error "Lựa chọn không hợp lệ!"; echo ""; read -p "Nhấn Enter để tiếp tục..." ;;
                 esac
                 ;;
+            "vieneu-tts")
+                local env_file="$HOMELAB_DIR/vieneu-tts/.env"
+                local cur_user=""
+                local cur_pass=""
+                if [ -f "$env_file" ]; then
+                    cur_user=$(grep "^TTS_ADMIN_USER=" "$env_file" 2>/dev/null | cut -d '=' -f2- | tr -d '"' | tr -d "'")
+                    cur_pass=$(grep "^TTS_ADMIN_PASS=" "$env_file" 2>/dev/null | cut -d '=' -f2- | tr -d '"' | tr -d "'")
+                fi
+
+                local is_vieneu_auth=0
+                if [ -n "$cur_user" ] && [ -n "$cur_pass" ]; then
+                    is_vieneu_auth=1
+                fi
+
+                if [ "$is_vieneu_auth" -eq 1 ]; then
+                    case $adv_choice in
+                        1)
+                            echo ""
+                            echo -e "${YELLOW}--- TẮT BẢO VỆ ĐĂNG NHẬP VIENEU-TTS ---${NC}"
+                            read -p "$(echo -e "${YELLOW}⚠ Bạn có chắc chắn muốn TẮT xác thực đăng nhập (vào thẳng WebUI)? (Y/n): ${NC}")" cf_off
+                            if [[ "$cf_off" =~ ^[Nn]$ ]]; then
+                                print_warning "Đã hủy thao tác tắt bảo vệ."
+                                echo ""; read -p "Nhấn Enter để tiếp tục..."
+                                continue
+                            fi
+
+                            echo -e "🔄 ${YELLOW}Đang gỡ bỏ cấu hình mật khẩu trong .env...${NC}"
+                            sed -i '/^TTS_ADMIN_USER=/d' "$env_file" 2>/dev/null || true
+                            sed -i '/^TTS_ADMIN_PASS=/d' "$env_file" 2>/dev/null || true
+
+                            # Đảm bảo file code đã có logic env và compose đã mount file
+                            patch_vieneu_gradio_main "$HOMELAB_DIR/vieneu-tts/app/apps/gradio_main.py"
+                            if ! grep -q "gradio_main.py" "$HOMELAB_DIR/vieneu-tts/docker-compose.yml" 2>/dev/null; then
+                                sed -i '/user_voices/a \      - ./app/apps/gradio_main.py:/workspace/apps/gradio_main.py' "$HOMELAB_DIR/vieneu-tts/docker-compose.yml" 2>/dev/null || true
+                            fi
+
+                            echo -e "🔄 ${YELLOW}Đang khởi động lại container vieneu-tts...${NC}"
+                            cd "$HOMELAB_DIR/vieneu-tts" && docker compose up -d --force-recreate >/dev/null 2>&1
+                            docker cp "$HOMELAB_DIR/vieneu-tts/app/apps/gradio_main.py" vieneu-tts:/workspace/apps/gradio_main.py 2>/dev/null || true
+                            docker restart vieneu-tts >/dev/null 2>&1 || true
+
+                            print_success "Đã khởi động lại container vieneu-tts thành công!"
+                            print_success "Đã TẮT xác thực đăng nhập! Bây giờ bạn có thể vào WebUI trực tiếp."
+                            echo ""; read -p "Nhấn Enter để tiếp tục..."
+                            ;;
+                        2)
+                            echo ""
+                            echo -e "${CYAN}--- THÔNG TIN ĐĂNG NHẬP VIENEU-TTS ---${NC}"
+                            echo -e "Tài khoản (Username) : ${YELLOW}${cur_user:-admin}${NC}"
+                            echo -e "Mật khẩu (Password)  : ${GREEN}${cur_pass:-admin123}${NC}"
+                            echo -e "${CYAN}--------------------------------------${NC}"
+                            echo ""; read -p "Nhấn Enter để tiếp tục..."
+                            ;;
+                        3)
+                            local cur_u_display=${cur_user:-admin}
+                            echo ""
+                            echo -e "${MAGENTA}--- ĐỔI TÀI KHOẢN / MẬT KHẨU VIENEU-TTS ---${NC}"
+                            read -p "Nhập Tên tài khoản mới (Enter giữ mặc định '$cur_u_display'): " new_user
+                            new_user=${new_user:-$cur_u_display}
+                            read -p "Nhập Mật khẩu mới: " new_pass
+                            if [ -n "$new_pass" ]; then
+                                echo -e "🔄 ${YELLOW}Đang cập nhật mật khẩu mới vào .env...${NC}"
+                                sed -i '/^TTS_ADMIN_USER=/d' "$env_file" 2>/dev/null || true
+                                sed -i '/^TTS_ADMIN_PASS=/d' "$env_file" 2>/dev/null || true
+                                echo "TTS_ADMIN_USER=$new_user" >> "$env_file"
+                                echo "TTS_ADMIN_PASS=$new_pass" >> "$env_file"
+
+                                patch_vieneu_gradio_main "$HOMELAB_DIR/vieneu-tts/app/apps/gradio_main.py"
+                                if ! grep -q "gradio_main.py" "$HOMELAB_DIR/vieneu-tts/docker-compose.yml" 2>/dev/null; then
+                                    sed -i '/user_voices/a \      - ./app/apps/gradio_main.py:/workspace/apps/gradio_main.py' "$HOMELAB_DIR/vieneu-tts/docker-compose.yml" 2>/dev/null || true
+                                fi
+
+                                echo -e "🔄 ${YELLOW}Đang khởi động lại container vieneu-tts...${NC}"
+                                cd "$HOMELAB_DIR/vieneu-tts" && docker compose up -d --force-recreate >/dev/null 2>&1
+                                docker cp "$HOMELAB_DIR/vieneu-tts/app/apps/gradio_main.py" vieneu-tts:/workspace/apps/gradio_main.py 2>/dev/null || true
+                                docker restart vieneu-tts >/dev/null 2>&1 || true
+
+                                print_success "Đã khởi động lại container vieneu-tts thành công!"
+                                print_success "Đã đổi mật khẩu thành công! Tài khoản: $new_user"
+                            else
+                                print_error "Mật khẩu không được để trống!"
+                            fi
+                            echo ""; read -p "Nhấn Enter để tiếp tục..."
+                            ;;
+                        4)
+                            echo "Đang sửa lỗi phân quyền (chmod 777 & chown 1000) cho VieNeu-TTS..."
+                            chmod -R 777 "$HOMELAB_DIR/vieneu-tts/data" 2>/dev/null || true
+                            docker exec --user root vieneu-tts chown -R 1000:1000 /home/app/.cache /workspace/output_audio /home/app/.vieneu 2>/dev/null || true
+                            docker exec --user root vieneu-tts chmod -R 777 /workspace/output_audio /home/app/.vieneu 2>/dev/null || true
+                            print_success "Đã mở quyền ghi tối đa thành công!"
+                            echo ""; read -p "Nhấn Enter để tiếp tục..."
+                            ;;
+                        5)
+                            echo -e "${YELLOW}🧹 Dọn dẹp bộ nhớ đệm Hugging Face Cache${NC}"
+                            echo "Thao tác này sẽ xóa các model weights đã tải về để giải phóng dung lượng ổ cứng."
+                            read -p "Bạn có chắc chắn muốn dọn dẹp cache không? (y/N): " cf_clean
+                            if [[ "$cf_clean" =~ ^[Yy]$ ]]; then
+                                rm -rf "$HOMELAB_DIR/vieneu-tts/data/hf_cache/"* 2>/dev/null || true
+                                print_success "Đã dọn dẹp sạch sẽ bộ nhớ đệm!"
+                            fi
+                            echo ""; read -p "Nhấn Enter để tiếp tục..."
+                            ;;
+                        *) print_error "Lựa chọn không hợp lệ!"; echo ""; read -p "Nhấn Enter để tiếp tục..." ;;
+                    esac
+                else
+                    case $adv_choice in
+                        1)
+                            echo ""
+                            echo -e "${GREEN}--- BẬT BẢO VỆ MẬT KHẨU VIENEU-TTS ---${NC}"
+                            read -p "$(echo -e "${YELLOW}⚠ Bạn có chắc chắn muốn BẬT xác thực mật khẩu cho VieNeu-TTS? (Y/n): ${NC}")" cf_on
+                            if [[ "$cf_on" =~ ^[Nn]$ ]]; then
+                                print_warning "Đã hủy thao tác bật bảo vệ."
+                                echo ""; read -p "Nhấn Enter để tiếp tục..."
+                                continue
+                            fi
+
+                            read -p "Nhập Tài khoản muốn tạo (Enter lấy mặc định 'admin'): " set_user
+                            set_user=${set_user:-admin}
+                            read -p "Nhập Mật khẩu muốn tạo (Enter lấy mặc định 'admin123'): " set_pass
+                            set_pass=${set_pass:-admin123}
+
+                            echo -e "🔄 ${YELLOW}Đang thiết lập cấu hình biến môi trường...${NC}"
+                            # Lưu vào .env
+                            sed -i '/^TTS_ADMIN_USER=/d' "$env_file" 2>/dev/null || true
+                            sed -i '/^TTS_ADMIN_PASS=/d' "$env_file" 2>/dev/null || true
+                            echo "TTS_ADMIN_USER=$set_user" >> "$env_file"
+                            echo "TTS_ADMIN_PASS=$set_pass" >> "$env_file"
+
+                            patch_vieneu_gradio_main "$HOMELAB_DIR/vieneu-tts/app/apps/gradio_main.py"
+
+                            # Đảm bảo compose có mount file
+                            if ! grep -q "gradio_main.py" "$HOMELAB_DIR/vieneu-tts/docker-compose.yml" 2>/dev/null; then
+                                sed -i '/user_voices/a \      - ./app/apps/gradio_main.py:/workspace/apps/gradio_main.py' "$HOMELAB_DIR/vieneu-tts/docker-compose.yml" 2>/dev/null || true
+                            fi
+
+                            echo -e "🔄 ${YELLOW}Đang khởi động lại container vieneu-tts...${NC}"
+                            cd "$HOMELAB_DIR/vieneu-tts" && docker compose up -d --force-recreate >/dev/null 2>&1
+                            docker cp "$HOMELAB_DIR/vieneu-tts/app/apps/gradio_main.py" vieneu-tts:/workspace/apps/gradio_main.py 2>/dev/null || true
+                            docker restart vieneu-tts >/dev/null 2>&1 || true
+
+                            print_success "Đã khởi động lại container vieneu-tts thành công!"
+                            print_success "Đã BẬT bảo vệ mật khẩu thành công!"
+                            echo -e "🔐 Tài khoản: ${YELLOW}$set_user${NC} | Mật khẩu: ${GREEN}$set_pass${NC}"
+                            echo ""; read -p "Nhấn Enter để tiếp tục..."
+                            ;;
+                        2)
+                            echo "Đang sửa lỗi phân quyền (chmod 777 & chown 1000) cho VieNeu-TTS..."
+                            chmod -R 777 "$HOMELAB_DIR/vieneu-tts/data" 2>/dev/null || true
+                            docker exec --user root vieneu-tts chown -R 1000:1000 /home/app/.cache /workspace/output_audio /home/app/.vieneu 2>/dev/null || true
+                            docker exec --user root vieneu-tts chmod -R 777 /workspace/output_audio /home/app/.vieneu 2>/dev/null || true
+                            print_success "Đã mở quyền ghi tối đa thành công!"
+                            echo ""; read -p "Nhấn Enter để tiếp tục..."
+                            ;;
+                        3)
+                            echo -e "${YELLOW}🧹 Dọn dẹp bộ nhớ đệm Hugging Face Cache${NC}"
+                            echo "Thao tác này sẽ xóa các model weights đã tải về để giải phóng dung lượng ổ cứng."
+                            read -p "Bạn có chắc chắn muốn dọn dẹp cache không? (y/N): " cf_clean
+                            if [[ "$cf_clean" =~ ^[Yy]$ ]]; then
+                                rm -rf "$HOMELAB_DIR/vieneu-tts/data/hf_cache/"* 2>/dev/null || true
+                                print_success "Đã dọn dẹp sạch sẽ bộ nhớ đệm!"
+                            fi
+                            echo ""; read -p "Nhấn Enter để tiếp tục..."
+                            ;;
+                        *) print_error "Lựa chọn không hợp lệ!"; echo ""; read -p "Nhấn Enter để tiếp tục..." ;;
+                    esac
+                fi
+                ;;
+            "beszel")
+                case $adv_choice in
+                    1)
+                        if [ -f "$HOMELAB_DIR/beszel/.env" ]; then
+                            local b_email=$(grep "^USER_EMAIL=" "$HOMELAB_DIR/beszel/.env" 2>/dev/null | cut -d '=' -f2)
+                            local b_pass=$(grep "^USER_PASSWORD=" "$HOMELAB_DIR/beszel/.env" 2>/dev/null | cut -d '=' -f2)
+                            echo -e "🔐 ${GREEN}Tài khoản đăng nhập Beszel Dashboard:${NC}"
+                            echo -e "   - Email:    ${YELLOW}$b_email${NC}"
+                            echo -e "   - Mật khẩu: ${YELLOW}$b_pass${NC}"
+                        else
+                            print_error "Không tìm thấy file .env của Beszel."
+                        fi
+                        echo ""; read -p "Nhấn Enter để tiếp tục..."
+                        ;;
+                    2)
+                        echo -e "🔄 ${CYAN}Đổi mật khẩu tài khoản Beszel Dashboard${NC}"
+                        local b_email="admin@homelab.local"
+                        if [ -f "$HOMELAB_DIR/beszel/.env" ]; then
+                            local env_e=$(grep "^USER_EMAIL=" "$HOMELAB_DIR/beszel/.env" 2>/dev/null | cut -d '=' -f2)
+                            [ -n "$env_e" ] && b_email="$env_e"
+                        fi
+                        echo -e "Tài khoản: ${YELLOW}$b_email${NC}"
+                        read -p "Nhập mật khẩu mới muốn đặt: " new_pass
+                        if [ -z "$new_pass" ]; then
+                            print_error "Mật khẩu không được để trống!"
+                        else
+                            echo "Đang cập nhật mật khẩu vào cơ sở dữ liệu PocketBase..."
+                            docker exec beszel /beszel superuser upsert "$b_email" "$new_pass" >/dev/null 2>&1 || true
+                            
+                            # Lấy Auth Token từ PocketBase API
+                            local token=$(curl -s -X POST "http://127.0.0.1:8090/api/collections/_superusers/auth-with-password" \
+                                -H "Content-Type: application/json" \
+                                -d "{\"identity\":\"$b_email\",\"password\":\"$new_pass\"}" 2>/dev/null | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+                            
+                            if [ -z "$token" ]; then
+                                token=$(curl -s -X POST "http://127.0.0.1:8090/api/admins/auth-with-password" \
+                                    -H "Content-Type: application/json" \
+                                    -d "{\"identity\":\"$b_email\",\"password\":\"$new_pass\"}" 2>/dev/null | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+                            fi
+                            
+                            local user_id=$(curl -s -H "Authorization: $token" "http://127.0.0.1:8090/api/collections/users/records" 2>/dev/null | grep -o '"id":"[^"]*"' | head -n 1 | cut -d'"' -f4)
+                            
+                            local patch_res=""
+                            if [ -n "$user_id" ] && [ -n "$token" ]; then
+                                patch_res=$(curl -s -X PATCH "http://127.0.0.1:8090/api/collections/users/records/$user_id" \
+                                    -H "Authorization: $token" \
+                                    -H "Content-Type: application/json" \
+                                    -d "{\"password\":\"$new_pass\",\"passwordConfirm\":\"$new_pass\"}" 2>/dev/null)
+                            fi
+                            
+                            if echo "$patch_res" | grep -q '"id":'; then
+                                sed -i "s/^USER_PASSWORD=.*/USER_PASSWORD=$new_pass/" "$HOMELAB_DIR/beszel/.env" 2>/dev/null || true
+                                print_success "Đã đổi mật khẩu tài khoản Beszel thành công!"
+                                echo -e "Mật khẩu mới của bạn: ${YELLOW}$new_pass${NC}"
+                                echo "Bây giờ bạn có thể đăng nhập ngay vào WebUI với mật khẩu này."
+                            else
+                                print_warning "Đã cấp quyền Superuser nhưng chưa cập nhật được bảng users qua API."
+                                local b_domain=$(grep "^DOMAIN=" "$HOMELAB_DIR/beszel/.env" 2>/dev/null | cut -d '=' -f2)
+                                echo -e "Bạn có thể vào trang: ${CYAN}https://${b_domain:-beszel.domain}/_/${NC}"
+                                echo "Đăng nhập: $b_email / $new_pass > vào bảng 'users' để đổi trực tiếp."
+                            fi
+                        fi
+                        echo ""; read -p "Nhấn Enter để tiếp tục..."
+                        ;;
+                    3)
+                        echo -e "🛡️ ${GREEN}Public Key của Beszel Agent:${NC}"
+                        if [ -f "$HOMELAB_DIR/beszel/data/beszel_data/id_ed25519.pub" ]; then
+                            local pub_k=$(cat "$HOMELAB_DIR/beszel/data/beszel_data/id_ed25519.pub")
+                            echo -e "${YELLOW}$pub_k${NC}"
+                            echo ""
+                            echo -e "${CYAN}Gợi ý:${NC} Khi thêm máy chủ mới trên WebUI Beszel, bạn dùng khóa này để gán vào biến KEY của Agent."
+                        else
+                            print_error "Chưa tìm thấy file khóa public key."
+                        fi
+                        echo ""; read -p "Nhấn Enter để tiếp tục..."
+                        ;;
+                    4)
+                        echo -e "📖 ${GREEN}Hướng dẫn Kết nối Máy chủ vào Beszel Dashboard:${NC}"
+                        echo -e "---------------------------------------------------------"
+                        echo -e "1. Mở WebUI Beszel và đăng nhập với tài khoản admin."
+                        echo -e "2. Bấm nút ${GREEN}Add System${NC} (Thêm Hệ thống) ở góc trên bên phải."
+                        echo -e "3. Điền các trường thông tin:"
+                        echo -e "   - ${YELLOW}Tên (Name):${NC} HomeLab (hoặc tên tùy thích)"
+                        echo -e "   - ${YELLOW}Host / IP:${NC}  ${CYAN}/beszel_socket/beszel.sock${NC}"
+                        echo -e "   - ${YELLOW}Port:${NC}       Để trống hoặc mặc định"
+                        echo -e "4. Bấm ${GREEN}Save${NC} (Lưu) -> Trạng thái hệ thống sẽ hiện ${GREEN}Xanh lá (Connected)${NC} ngay lập tức!"
+                        echo ""
+                        echo -e "💡 Xem tài liệu chi tiết tại: ${YELLOW}docs/BESZEL_GUIDE.md${NC}"
+                        echo ""; read -p "Nhấn Enter để tiếp tục..."
+                        ;;
+                    *) print_error "Lựa chọn không hợp lệ!"; echo ""; read -p "Nhấn Enter để tiếp tục..." ;;
+                esac
+                ;;
             *)
                 print_error "Lựa chọn không hợp lệ!"; echo ""; read -p "Nhấn Enter để tiếp tục..."
                 ;;
@@ -1751,6 +2244,15 @@ get_app_version() {
             "uptimekuma")
                 ver=$(docker exec "$app" node -e 'console.log(require("/app/package.json").version)' 2>/dev/null)
                 ;;
+            "vieneu-tts")
+                ver=$(docker exec "$app" python3 -c "import vieneu; print(getattr(vieneu, '__version__', ''))" 2>/dev/null)
+                if [ -z "$ver" ]; then
+                    ver=$(docker exec "$app" cat /workspace/pyproject.toml 2>/dev/null | grep -E '^version\s*=' | head -n1 | cut -d'"' -f2)
+                fi
+                ;;
+            "beszel")
+                ver=$(docker exec "$app" /beszel --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1)
+                ;;
         esac
     fi
 
@@ -1784,7 +2286,9 @@ manage_single_app() {
             "9router") display_name="9Router" ;;
             "openclaw") display_name="OpenClaw" ;;
             "hermes") display_name="Hermes Agent" ;;
+            "vieneu-tts") display_name="VieNeu-TTS" ;;
             "uptimekuma") display_name="Uptime Kuma" ;;
+            "beszel") display_name="Beszel" ;;
             "nodejs") display_name="NodeJS" ;;
             "duplicati") display_name="Duplicati" ;;
             "dozzle") display_name="Dozzle" ;;
@@ -1868,8 +2372,22 @@ manage_single_app() {
             4)
                 echo "Đang tải bản cập nhật và nạp lại cấu hình cho $app_name..."
                 cd "$HOMELAB_DIR/$app_name"
-                docker compose pull
-                docker compose up -d
+                if [ "$app_name" == "vieneu-tts" ] && [ -d "$HOMELAB_DIR/vieneu-tts/app/.git" ]; then
+                    echo "Đang kéo mã nguồn mới nhất từ GitHub..."
+                    cd "$HOMELAB_DIR/vieneu-tts/app"
+                    git checkout -- docker/Dockerfile.cpu 2>/dev/null || true
+                    git pull || true
+                    sed -i 's|examples/audio_ref/ examples/audio_ref/|examples/ examples/|' "$HOMELAB_DIR/vieneu-tts/app/docker/Dockerfile.cpu" 2>/dev/null || true
+                    patch_vieneu_gradio_main "$HOMELAB_DIR/vieneu-tts/app/apps/gradio_main.py"
+                    if ! grep -q "gradio_main.py" "$HOMELAB_DIR/vieneu-tts/docker-compose.yml" 2>/dev/null; then
+                        sed -i '/user_voices/a \      - ./app/apps/gradio_main.py:/workspace/apps/gradio_main.py' "$HOMELAB_DIR/vieneu-tts/docker-compose.yml" 2>/dev/null || true
+                    fi
+                    cd "$HOMELAB_DIR/vieneu-tts"
+                    docker compose build
+                else
+                    docker compose pull
+                fi
+                docker compose up -d --force-recreate
                 print_success "Đã xử lý xong!"
                 echo ""; read -p "Nhấn Enter để tiếp tục..."
                 ;;
@@ -1899,6 +2417,9 @@ manage_single_app() {
                     cd "$HOMELAB_DIR/$app_name" && docker compose down -v || true
                     cd /
                     rm -rf "$HOMELAB_DIR/$app_name"
+                    if [ "$app_name" == "vieneu-tts" ]; then
+                        docker rmi vieneu-tts:latest 2>/dev/null || true
+                    fi
                     local safe_app_upper=$(echo "$app_name" | tr '[:lower:]' '[:upper:]' | tr '-' '_')
                     sed -i "/^DOMAIN_${safe_app_upper}=/d" "$CONFIG_FILE"
                     print_success "Đã xóa sạch ứng dụng $app_name"
@@ -1990,13 +2511,15 @@ app_store_menu() {
         local st5=$(get_status "cliproxy")
         local st6=$(get_status "openclaw")
         local st7=$(get_status "hermes")
-        local st8=$(get_status "uptimekuma")
-        local st9=$(get_status "nodejs")
-        local st10=$(get_status "duplicati")
-        local st11=$(get_status "dozzle")
-        local st12=$(get_status "postgres-core")
-        local st13=$(get_status "redis-core")
-        local st14=$(get_status "portainer")
+        local st8=$(get_status "vieneu-tts")
+        local st9=$(get_status "uptimekuma")
+        local st10=$(get_status "beszel")
+        local st11=$(get_status "nodejs")
+        local st12=$(get_status "duplicati")
+        local st13=$(get_status "dozzle")
+        local st14=$(get_status "postgres-core")
+        local st15=$(get_status "redis-core")
+        local st16=$(get_status "portainer")
 
         print_section "📦 CỬA HÀNG ỨNG DỤNG (APP STORE)"
         
@@ -2010,20 +2533,22 @@ app_store_menu() {
         echo -e "${GREEN} 5.${NC} CLI Proxy API (Trạm trung chuyển & Quản lý API) $st5"
         echo -e "${GREEN} 6.${NC} OpenClaw (Trợ lý AI tự trị) $st6"
         echo -e "${GREEN} 7.${NC} Hermes Agent (Tác tử suy luận lõi) $st7"
+        echo -e "${GREEN} 8.${NC} VieNeu-TTS (TTS tiếng Việt & Clone giọng) $st8"
         
         echo -e "${BLUE} --- Nhóm Tiện ích & Quản trị Hệ thống ---${NC}"
-        echo -e "${GREEN} 8.${NC} Uptime Kuma (Giám sát hệ thống) $st8"
-        echo -e "${GREEN} 9.${NC} NodeJS (Môi trường Web Backend) $st9"
-        echo -e "${GREEN} 10.${NC} Duplicati (Sao lưu Cloud Google Drive) $st10"
-        echo -e "${GREEN} 11.${NC} Dozzle (Xem Log Docker Thời gian thực) $st11"
+        echo -e "${GREEN} 9.${NC} Uptime Kuma (Giám sát hệ thống) $st9"
+        echo -e "${GREEN} 10.${NC} Beszel (Giám sát Phần cứng & Docker siêu nhẹ) $st10"
+        echo -e "${GREEN} 11.${NC} NodeJS (Môi trường Web Backend) $st11"
+        echo -e "${GREEN} 12.${NC} Duplicati (Sao lưu Cloud Google Drive) $st12"
+        echo -e "${GREEN} 13.${NC} Dozzle (Xem Log Docker Thời gian thực) $st13"
         
         echo -e "${BLUE} --- Nhóm Dịch vụ Lõi (Core Services) ---${NC}"
-        echo -e "${GREEN} 12.${NC} PostgreSQL (Database dùng chung) $st12"
-        echo -e "${GREEN} 13.${NC} Redis (Cache & Message Broker) $st13"
+        echo -e "${GREEN} 14.${NC} PostgreSQL (Database dùng chung) $st14"
+        echo -e "${GREEN} 15.${NC} Redis (Cache & Message Broker) $st15"
         
         echo -e "${BLUE} --- Tùy chọn Nâng cao ---${NC}"
-        echo -e "${GREEN} 14.${NC} Portainer CE (Quản lý Docker UI) $st14"
-        echo -e "${GREEN} 15.${NC} Quản lý các ứng dụng khác (Tự động quét)"
+        echo -e "${GREEN} 16.${NC} Portainer CE (Quản lý Docker UI) $st16"
+        echo -e "${GREEN} 17.${NC} Quản lý các ứng dụng khác (Tự động quét)"
         echo -e "${YELLOW} 0.${NC} Quay lại Menu chính"
         echo ""
         read -p "Nhập lựa chọn của bạn: " app_choice
@@ -2253,6 +2778,40 @@ EOF
                 ;;
 
             8)
+                if [ -f "$HOMELAB_DIR/vieneu-tts/docker-compose.yml" ]; then manage_single_app "vieneu-tts"; continue; fi
+                
+                read -r -d '' compose << 'EOF' || true
+services:
+  vieneu-tts:
+    image: vieneu-tts:latest
+    build:
+      context: ./app
+      dockerfile: docker/Dockerfile.cpu
+    container_name: vieneu-tts
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - HF_HOME=/home/app/.cache/huggingface
+      - PYTHONUNBUFFERED=1
+      - GRADIO_SERVER_PORT=7860
+      - GRADIO_SERVER_NAME=0.0.0.0
+      - GRADIO_SHARE=0
+    volumes:
+      - ./data/hf_cache:/home/app/.cache/huggingface
+      - ./data/output_audio:/workspace/output_audio
+      - ./data/user_voices:/home/app/.vieneu
+      - ./app/apps/gradio_main.py:/workspace/apps/gradio_main.py
+    networks:
+      - homelab_net
+networks:
+  homelab_net:
+    external: true
+EOF
+                install_app "vieneu-tts" "7860" "$compose"
+                ;;
+
+            9)
                 if [ -f "$HOMELAB_DIR/uptimekuma/docker-compose.yml" ]; then manage_single_app "uptimekuma"; continue; fi
                 read -r -d '' compose << 'EOF' || true
 services:
@@ -2272,7 +2831,47 @@ networks:
 EOF
                 install_app "uptimekuma" "3001" "$compose"
                 ;;
-            9)
+            10)
+                if [ -f "$HOMELAB_DIR/beszel/docker-compose.yml" ]; then manage_single_app "beszel"; continue; fi
+                read -r -d '' compose << 'EOF' || true
+services:
+  beszel:
+    image: henrygd/beszel:latest
+    container_name: beszel
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data/beszel_data:/beszel_data
+      - ./data/beszel_socket:/beszel_socket
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - homelab_net
+
+  beszel-agent:
+    image: henrygd/beszel-agent:latest
+    container_name: beszel-agent
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./data/beszel_agent_data:/var/lib/beszel-agent
+      - ./data/beszel_socket:/beszel_socket
+    environment:
+      - LISTEN=/beszel_socket/beszel.sock
+      - KEY=${BESZEL_KEY}
+      - FILESYSTEM=/dev/sda1,/dev/nvme0n1p1,/dev/nvme0n1p2,/
+      - DOCKER_HOST=unix:///var/run/docker.sock
+networks:
+  homelab_net:
+    external: true
+EOF
+                install_app "beszel" "8090" "$compose"
+                ;;
+            11)
                 if [ -f "$HOMELAB_DIR/nodejs/docker-compose.yml" ]; then manage_single_app "nodejs"; continue; fi
                 read -r -d '' compose << 'EOF' || true
 services:
@@ -2372,7 +2971,7 @@ networks:
 EOF
                 install_app "nodejs" "3000" "$compose"
                 ;;
-            10)
+            12)
                 if [ -f "$HOMELAB_DIR/duplicati/docker-compose.yml" ]; then manage_single_app "duplicati"; continue; fi
                 
                 # Khởi tạo Encryption Key cho Duplicati nếu chưa có
@@ -2409,7 +3008,7 @@ networks:
 EOF
                 install_app "duplicati" "8200" "$compose"
                 ;;
-            11)
+            13)
                 if [ -f "$HOMELAB_DIR/dozzle/docker-compose.yml" ]; then manage_single_app "dozzle"; continue; fi
                 
                 read -r -d '' compose << 'EOF' || true
@@ -2431,7 +3030,7 @@ networks:
 EOF
                 install_app "dozzle" "8080" "$compose"
                 ;;
-            12)
+            14)
                 if [ -f "$HOMELAB_DIR/postgres-core/docker-compose.yml" ]; then manage_single_app "postgres-core"; continue; fi
                 
                 # Khởi tạo DB Password ngẫu nhiên bảo mật
@@ -2457,7 +3056,7 @@ networks:
 EOF
                 install_app "postgres-core" "none" "$compose"
                 ;;
-            13)
+            15)
                 if [ -f "$HOMELAB_DIR/redis-core/docker-compose.yml" ]; then manage_single_app "redis-core"; continue; fi
                 
                 mkdir -p "$HOMELAB_DIR/redis-core"
@@ -2482,7 +3081,7 @@ networks:
 EOF
                 install_app "redis-core" "none" "$compose"
                 ;;
-            14)
+            16)
                 if [ -f "$HOMELAB_DIR/portainer/docker-compose.yml" ]; then manage_single_app "portainer"; continue; fi
                 read -r -d '' compose << 'EOF' || true
 services:
@@ -2506,7 +3105,7 @@ EOF
                 install_app "portainer" "9000" "$compose"
                 ;;
 
-            15)
+            17)
                 manage_apps_menu
                 ;;
             0) break ;;
