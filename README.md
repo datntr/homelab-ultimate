@@ -229,7 +229,10 @@ Hiện tại script đang hỗ trợ triển khai nhanh các ứng dụng sau:
 | **OmniRoute / 9Router**| AI Gateway | Cổng định tuyến API AI giúp điều phối request. |
 | **OpenClaw** | AI Assistant | Trợ lý AI cá nhân tự trị (Tích hợp Chat qua Telegram/WhatsApp). |
 | **Hermes Agent** | Tác tử suy luận lõi | Phần mềm Agent gốc từ NousResearch chuyên xử lý logic chuyên sâu. |
+| **ZeroTTS** | AI Giọng nói | Công nghệ TTS tiếng Việt ONNX CPU siêu tốc, 8 giọng chuẩn Bắc/Trung/Nam. |
+| **VieNeu-TTS** | AI Giọng nói | Mô hình TTS tiếng Việt hỗ trợ Voice Cloning nhân bản giọng nói theo mẫu audio. |
 | **Uptime Kuma** | Giám sát | Theo dõi uptime các dịch vụ, cảnh báo qua Telegram/Discord. |
+| **Beszel** | Giám sát Phần cứng | Giám sát CPU/RAM/Disk/Docker siêu nhẹ qua biểu đồ Web trực quan. |
 | **NodeJS** | Web Server| Container chạy sẵn Express.js để code API/Webhook. |
 | **Duplicati** | Sao lưu | Lập lịch nén và đẩy bản sao lưu lên Google Drive/OneDrive. |
 | **Dozzle** | Logging | Giao diện web nhẹ nhàng giúp xem Log Docker theo thời gian thực. |
@@ -251,6 +254,8 @@ Trong quá trình sử dụng, nếu bạn gặp vướng mắc về cách cấu
 - 🔀 [Cổng định tuyến AI Nâng cao (OmniRoute)](docs/OMNIROUTE_GUIDE.md)
 - 💬 [Trợ lý ảo cá nhân AI (OpenClaw)](docs/OPENCLAW_GUIDE.md)
 - 🧠 [Sức mạnh của Tác tử AI (Hermes Agent)](docs/HERMES_AGENT_GUIDE.md)
+- 🎙️ [Mô hình Giọng nói AI Tiếng Việt Siêu Tốc (ZeroTTS)](docs/ZEROTTS_GUIDE.md)
+- 📊 [Giám sát Phần cứng & Container (Beszel)](docs/BESZEL_GUIDE.md)
 - 📓 [Lập lịch Backup với Duplicati](docs/DUPLICATI_GUIDE.md)
 - 📓 [Sử dụng các tiện ích hệ thống (Portainer, Dozzle, Kuma)](docs/UTILITIES_GUIDE.md)
 

@@ -623,6 +623,59 @@ except Exception:
     fi
 }
 
+patch_zerotts_app() {
+    local target_file="$1"
+    if [ ! -f "$target_file" ]; then return 0; fi
+
+    local py_cmd=""
+    if command -v python3 &>/dev/null; then py_cmd="python3"
+    elif command -v python &>/dev/null; then py_cmd="python"
+    fi
+
+    if [ -n "$py_cmd" ]; then
+        $py_cmd -c '
+import sys, re
+target = sys.argv[1]
+try:
+    with open(target, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    lines = content.splitlines()
+    cleaned = []
+    for l in lines:
+        if "admin_user = os.getenv" in l or "admin_pass = os.getenv" in l or "auth = [(admin_user" in l:
+            continue
+        cleaned.append(l)
+    content = "\n".join(cleaned)
+    content = content.replace("auth=auth, ", "").replace("auth=auth,", "").replace("auth=auth", "")
+
+    if "import os" not in content:
+        content = "import os\n" + content
+
+    new_mount = """    admin_user = os.getenv("TTS_ADMIN_USER")
+    admin_pass = os.getenv("TTS_ADMIN_PASS")
+    auth = [(admin_user, admin_pass)] if (admin_user and admin_pass) else None
+    app = gr.mount_gradio_app(app, demo.queue(), path="/", auth=auth,"""
+
+    content = re.sub(r"[ \t]*app = gr\.mount_gradio_app\(app, demo\.queue\(\), path=\"/\",", new_mount, content, count=1)
+
+    with open(target, "w", encoding="utf-8") as f:
+        f.write(content)
+except Exception:
+    pass
+' "$target_file" 2>/dev/null || true
+    fi
+
+    if ! grep -q "TTS_ADMIN_USER" "$target_file" 2>/dev/null; then
+        sed -i '/_ensure_stream_route/a \    admin_user = os.getenv("TTS_ADMIN_USER")\n    admin_pass = os.getenv("TTS_ADMIN_PASS")\n    auth = [(admin_user, admin_pass)] if (admin_user and admin_pass) else None' "$target_file" 2>/dev/null || true
+        sed -i 's/path="\/"/path="\/", auth=auth/' "$target_file" 2>/dev/null || true
+    fi
+
+    if docker ps -q -f "name=^zerotts$" 2>/dev/null | grep -q .; then
+        docker cp "$target_file" zerotts:/app/webui/app.py 2>/dev/null || true
+    fi
+}
+
 install_app() {
     local app_name=$1
     local port=$2
@@ -745,6 +798,51 @@ EOF_CLI
         chmod -R 777 "$HOMELAB_DIR/vieneu-tts/data" 2>/dev/null || true
     fi
 
+    if [ "$app_name" == "zerotts" ]; then
+        echo "Đang chuẩn bị môi trường cài đặt cho ZeroTTS..."
+        mkdir -p "$HOMELAB_DIR/zerotts"
+        if [ ! -d "$HOMELAB_DIR/zerotts/app" ]; then
+            echo "Đang tải mã nguồn ZeroTTS từ GitHub..."
+            git clone --depth 1 https://github.com/zeroweight-ai/ZeroTTS.git "$HOMELAB_DIR/zerotts/app"
+        fi
+        # Tạo Dockerfile tối ưu CPU ONNX cho ZeroTTS
+        cat << 'EOF_DOCKERFILE' > "$HOMELAB_DIR/zerotts/app/Dockerfile"
+FROM python:3.10-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/app/data/hf_cache
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libsndfile1 \
+    ffmpeg \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY . /app
+
+RUN pip install --no-cache-dir -U pip setuptools wheel && \
+    pip install --no-cache-dir -e ".[webui]"
+
+RUN mkdir -p /app/data/hf_cache /app/outputs/generated && \
+    chmod -R 777 /app/data /app/outputs
+
+EXPOSE 7861
+
+CMD ["python", "webui/app.py", "--host", "0.0.0.0", "--port", "7861"]
+EOF_DOCKERFILE
+
+        # Chuẩn bị sẵn cơ chế xác thực thông minh qua biến môi trường (.env)
+        patch_zerotts_app "$HOMELAB_DIR/zerotts/app/webui/app.py"
+        mkdir -p "$HOMELAB_DIR/zerotts/data/hf_cache"
+        mkdir -p "$HOMELAB_DIR/zerotts/data/output_audio"
+        chmod -R 777 "$HOMELAB_DIR/zerotts/data" "$HOMELAB_DIR/zerotts/app" 2>/dev/null || true
+    fi
+
     if [ "$app_name" == "beszel" ]; then
         echo "Đang chuẩn bị môi trường cho Beszel (Hub & Agent)..."
         mkdir -p "$HOMELAB_DIR/beszel/data/beszel_data"
@@ -794,6 +892,9 @@ EOF_CLI
     if [ "$app_name" == "vieneu-tts" ]; then
         echo "Đang đóng gói Image VieNeu-TTS (CPU ONNX siêu nhẹ)..."
         docker compose build
+    elif [ "$app_name" == "zerotts" ]; then
+        echo "Đang đóng gói Image ZeroTTS (CPU ONNX siêu nhẹ & streaming)..."
+        docker compose build
     else
         docker compose pull
     fi
@@ -829,6 +930,10 @@ with open("/opt/data/config.yaml", "w") as f:
     if [ "$app_name" == "vieneu-tts" ]; then
         docker exec --user root "$app_name" chown -R 1000:1000 /home/app/.cache /workspace/output_audio /home/app/.vieneu 2>/dev/null || true
         docker exec --user root "$app_name" chmod -R 777 /workspace/output_audio /home/app/.vieneu 2>/dev/null || true
+    fi
+    if [ "$app_name" == "zerotts" ]; then
+        docker exec --user root "$app_name" chmod -R 777 /app/data /app/outputs 2>/dev/null || true
+        docker exec --user root "$app_name" chown -R 1000:1000 /app/data /app/outputs 2>/dev/null || true
     fi
 
     print_success "Cài đặt $app_name thành công!"
@@ -983,20 +1088,20 @@ advanced_tools_menu() {
                 echo -e "      • ${YELLOW}Dedicated${NC} (Dashboard Only): Chỉ chạy riêng Web Dashboard (tiết kiệm tài nguyên, tắt Gateway)"
                 echo -e "${GREEN} 5.${NC} 🚀 Bật / Khởi động lại Gateway"
                 ;;
-            "vieneu-tts")
+            "vieneu-tts"|"zerotts")
                 local cur_u=""
                 local cur_p=""
-                if [ -f "$HOMELAB_DIR/vieneu-tts/.env" ]; then
-                    cur_u=$(grep "^TTS_ADMIN_USER=" "$HOMELAB_DIR/vieneu-tts/.env" 2>/dev/null | cut -d '=' -f2- | tr -d '"' | tr -d "'")
-                    cur_p=$(grep "^TTS_ADMIN_PASS=" "$HOMELAB_DIR/vieneu-tts/.env" 2>/dev/null | cut -d '=' -f2- | tr -d '"' | tr -d "'")
+                if [ -f "$HOMELAB_DIR/$app_name/.env" ]; then
+                    cur_u=$(grep "^TTS_ADMIN_USER=" "$HOMELAB_DIR/$app_name/.env" 2>/dev/null | cut -d '=' -f2- | tr -d '"' | tr -d "'")
+                    cur_p=$(grep "^TTS_ADMIN_PASS=" "$HOMELAB_DIR/$app_name/.env" 2>/dev/null | cut -d '=' -f2- | tr -d '"' | tr -d "'")
                 fi
 
-                local is_vieneu_auth=0
+                local is_tts_auth=0
                 if [ -n "$cur_u" ] && [ -n "$cur_p" ]; then
-                    is_vieneu_auth=1
+                    is_tts_auth=1
                 fi
 
-                if [ "$is_vieneu_auth" -eq 1 ]; then
+                if [ "$is_tts_auth" -eq 1 ]; then
                     echo -e "${GREEN} 1.${NC} 🛡️ Xác thực đăng nhập: [${GREEN}ĐANG BẬT BẢO VỆ${NC}] ➔ Bấm để TẮT (Vào thẳng)"
                     echo -e "${CYAN} 2.${NC} 🔑 Xem Tài khoản & Mật khẩu hiện tại"
                     echo -e "${MAGENTA} 3.${NC} 🔄 Đổi Tài khoản / Mật khẩu"
@@ -2097,6 +2202,169 @@ with open(compose_file, 'w', encoding='utf-8') as f:
                     esac
                 fi
                 ;;
+            "zerotts")
+                local env_file="$HOMELAB_DIR/zerotts/.env"
+                local cur_user=""
+                local cur_pass=""
+                if [ -f "$env_file" ]; then
+                    cur_user=$(grep "^TTS_ADMIN_USER=" "$env_file" 2>/dev/null | cut -d '=' -f2- | tr -d '"' | tr -d "'")
+                    cur_pass=$(grep "^TTS_ADMIN_PASS=" "$env_file" 2>/dev/null | cut -d '=' -f2- | tr -d '"' | tr -d "'")
+                fi
+
+                local is_zero_auth=0
+                if [ -n "$cur_user" ] && [ -n "$cur_pass" ]; then
+                    is_zero_auth=1
+                fi
+
+                if [ "$is_zero_auth" -eq 1 ]; then
+                    case $adv_choice in
+                        1)
+                            echo ""
+                            echo -e "${YELLOW}--- TẮT BẢO VỆ ĐĂNG NHẬP ZEROTTS ---${NC}"
+                            read -p "$(echo -e "${YELLOW}⚠ Bạn có chắc chắn muốn TẮT xác thực đăng nhập (vào thẳng WebUI)? (Y/n): ${NC}")" cf_off
+                            if [[ "$cf_off" =~ ^[Nn]$ ]]; then
+                                print_warning "Đã hủy thao tác tắt bảo vệ."
+                                echo ""; read -p "Nhấn Enter để tiếp tục..."
+                                continue
+                            fi
+
+                            echo -e "🔄 ${YELLOW}Đang gỡ bỏ cấu hình mật khẩu trong .env...${NC}"
+                            sed -i '/^TTS_ADMIN_USER=/d' "$env_file" 2>/dev/null || true
+                            sed -i '/^TTS_ADMIN_PASS=/d' "$env_file" 2>/dev/null || true
+
+                            patch_zerotts_app "$HOMELAB_DIR/zerotts/app/webui/app.py"
+                            if ! grep -q "app.py" "$HOMELAB_DIR/zerotts/docker-compose.yml" 2>/dev/null; then
+                                sed -i '/output_audio/a \      - ./app/webui/app.py:/app/webui/app.py' "$HOMELAB_DIR/zerotts/docker-compose.yml" 2>/dev/null || true
+                            fi
+
+                            echo -e "🔄 ${YELLOW}Đang khởi động lại container zerotts...${NC}"
+                            cd "$HOMELAB_DIR/zerotts" && docker compose up -d --force-recreate >/dev/null 2>&1
+                            docker cp "$HOMELAB_DIR/zerotts/app/webui/app.py" zerotts:/app/webui/app.py 2>/dev/null || true
+                            docker restart zerotts >/dev/null 2>&1 || true
+
+                            print_success "Đã khởi động lại container zerotts thành công!"
+                            print_success "Đã TẮT xác thực đăng nhập! Bây giờ bạn có thể vào WebUI trực tiếp."
+                            echo ""; read -p "Nhấn Enter để tiếp tục..."
+                            ;;
+                        2)
+                            echo ""
+                            echo -e "${CYAN}--- THÔNG TIN ĐĂNG NHẬP ZEROTTS ---${NC}"
+                            echo -e "Tài khoản (Username) : ${YELLOW}${cur_user:-admin}${NC}"
+                            echo -e "Mật khẩu (Password)  : ${GREEN}${cur_pass:-admin123}${NC}"
+                            echo -e "${CYAN}-----------------------------------${NC}"
+                            echo ""; read -p "Nhấn Enter để tiếp tục..."
+                            ;;
+                        3)
+                            local cur_u_display=${cur_user:-admin}
+                            echo ""
+                            echo -e "${MAGENTA}--- ĐỔI TÀI KHOẢN / MẬT KHẨU ZEROTTS ---${NC}"
+                            read -p "Nhập Tên tài khoản mới (Enter giữ mặc định '$cur_u_display'): " new_user
+                            new_user=${new_user:-$cur_u_display}
+                            read -p "Nhập Mật khẩu mới: " new_pass
+                            if [ -n "$new_pass" ]; then
+                                echo -e "🔄 ${YELLOW}Đang cập nhật mật khẩu mới vào .env...${NC}"
+                                sed -i '/^TTS_ADMIN_USER=/d' "$env_file" 2>/dev/null || true
+                                sed -i '/^TTS_ADMIN_PASS=/d' "$env_file" 2>/dev/null || true
+                                echo "TTS_ADMIN_USER=$new_user" >> "$env_file"
+                                echo "TTS_ADMIN_PASS=$new_pass" >> "$env_file"
+
+                                patch_zerotts_app "$HOMELAB_DIR/zerotts/app/webui/app.py"
+                                if ! grep -q "app.py" "$HOMELAB_DIR/zerotts/docker-compose.yml" 2>/dev/null; then
+                                    sed -i '/output_audio/a \      - ./app/webui/app.py:/app/webui/app.py' "$HOMELAB_DIR/zerotts/docker-compose.yml" 2>/dev/null || true
+                                fi
+
+                                echo -e "🔄 ${YELLOW}Đang khởi động lại container zerotts...${NC}"
+                                cd "$HOMELAB_DIR/zerotts" && docker compose up -d --force-recreate >/dev/null 2>&1
+                                docker cp "$HOMELAB_DIR/zerotts/app/webui/app.py" zerotts:/app/webui/app.py 2>/dev/null || true
+                                docker restart zerotts >/dev/null 2>&1 || true
+
+                                print_success "Đã khởi động lại container zerotts thành công!"
+                                print_success "Đã đổi mật khẩu thành công! Tài khoản: $new_user"
+                            else
+                                print_error "Mật khẩu không được để trống!"
+                            fi
+                            echo ""; read -p "Nhấn Enter để tiếp tục..."
+                            ;;
+                        4)
+                            echo "Đang sửa lỗi phân quyền (chmod 777) cho ZeroTTS..."
+                            chmod -R 777 "$HOMELAB_DIR/zerotts/data" "$HOMELAB_DIR/zerotts/app" 2>/dev/null || true
+                            docker exec --user root zerotts chmod -R 777 /app/data /app/outputs 2>/dev/null || true
+                            docker exec --user root zerotts chown -R 1000:1000 /app/data /app/outputs 2>/dev/null || true
+                            print_success "Đã mở quyền ghi tối đa thành công!"
+                            echo ""; read -p "Nhấn Enter để tiếp tục..."
+                            ;;
+                        5)
+                            echo -e "${YELLOW}🧹 Dọn dẹp bộ nhớ đệm Hugging Face Cache${NC}"
+                            echo "Thao tác này sẽ xóa các model weights ZeroTTS đã tải về để giải phóng dung lượng ổ cứng."
+                            read -p "Bạn có chắc chắn muốn dọn dẹp cache không? (y/N): " cf_clean
+                            if [[ "$cf_clean" =~ ^[Yy]$ ]]; then
+                                rm -rf "$HOMELAB_DIR/zerotts/data/hf_cache/"* 2>/dev/null || true
+                                print_success "Đã dọn dẹp sạch sẽ bộ nhớ đệm!"
+                            fi
+                            echo ""; read -p "Nhấn Enter để tiếp tục..."
+                            ;;
+                        *) print_error "Lựa chọn không hợp lệ!"; echo ""; read -p "Nhấn Enter để tiếp tục..." ;;
+                    esac
+                else
+                    case $adv_choice in
+                        1)
+                            echo ""
+                            echo -e "${GREEN}--- BẬT BẢO VỆ MẬT KHẨU ZEROTTS ---${NC}"
+                            read -p "$(echo -e "${YELLOW}⚠ Bạn có chắc chắn muốn BẬT xác thực mật khẩu cho ZeroTTS? (Y/n): ${NC}")" cf_on
+                            if [[ "$cf_on" =~ ^[Nn]$ ]]; then
+                                print_warning "Đã hủy thao tác bật bảo vệ."
+                                echo ""; read -p "Nhấn Enter để tiếp tục..."
+                                continue
+                            fi
+
+                            read -p "Nhập Tài khoản muốn tạo (Enter lấy mặc định 'admin'): " set_user
+                            set_user=${set_user:-admin}
+                            read -p "Nhập Mật khẩu muốn tạo (Enter lấy mặc định 'admin123'): " set_pass
+                            set_pass=${set_pass:-admin123}
+
+                            echo -e "🔄 ${YELLOW}Đang thiết lập cấu hình biến môi trường...${NC}"
+                            sed -i '/^TTS_ADMIN_USER=/d' "$env_file" 2>/dev/null || true
+                            sed -i '/^TTS_ADMIN_PASS=/d' "$env_file" 2>/dev/null || true
+                            echo "TTS_ADMIN_USER=$set_user" >> "$env_file"
+                            echo "TTS_ADMIN_PASS=$set_pass" >> "$env_file"
+
+                            patch_zerotts_app "$HOMELAB_DIR/zerotts/app/webui/app.py"
+                            if ! grep -q "app.py" "$HOMELAB_DIR/zerotts/docker-compose.yml" 2>/dev/null; then
+                                sed -i '/output_audio/a \      - ./app/webui/app.py:/app/webui/app.py' "$HOMELAB_DIR/zerotts/docker-compose.yml" 2>/dev/null || true
+                            fi
+
+                            echo -e "🔄 ${YELLOW}Đang khởi động lại container zerotts...${NC}"
+                            cd "$HOMELAB_DIR/zerotts" && docker compose up -d --force-recreate >/dev/null 2>&1
+                            docker cp "$HOMELAB_DIR/zerotts/app/webui/app.py" zerotts:/app/webui/app.py 2>/dev/null || true
+                            docker restart zerotts >/dev/null 2>&1 || true
+
+                            print_success "Đã khởi động lại container zerotts thành công!"
+                            print_success "Đã BẬT bảo vệ mật khẩu thành công!"
+                            echo -e "🔐 Tài khoản: ${YELLOW}$set_user${NC} | Mật khẩu: ${GREEN}$set_pass${NC}"
+                            echo ""; read -p "Nhấn Enter để tiếp tục..."
+                            ;;
+                        2)
+                            echo "Đang sửa lỗi phân quyền (chmod 777) cho ZeroTTS..."
+                            chmod -R 777 "$HOMELAB_DIR/zerotts/data" "$HOMELAB_DIR/zerotts/app" 2>/dev/null || true
+                            docker exec --user root zerotts chmod -R 777 /app/data /app/outputs 2>/dev/null || true
+                            docker exec --user root zerotts chown -R 1000:1000 /app/data /app/outputs 2>/dev/null || true
+                            print_success "Đã mở quyền ghi tối đa thành công!"
+                            echo ""; read -p "Nhấn Enter để tiếp tục..."
+                            ;;
+                        3)
+                            echo -e "${YELLOW}🧹 Dọn dẹp bộ nhớ đệm Hugging Face Cache${NC}"
+                            echo "Thao tác này sẽ xóa các model weights ZeroTTS đã tải về để giải phóng dung lượng ổ cứng."
+                            read -p "Bạn có chắc chắn muốn dọn dẹp cache không? (y/N): " cf_clean
+                            if [[ "$cf_clean" =~ ^[Yy]$ ]]; then
+                                rm -rf "$HOMELAB_DIR/zerotts/data/hf_cache/"* 2>/dev/null || true
+                                print_success "Đã dọn dẹp sạch sẽ bộ nhớ đệm!"
+                            fi
+                            echo ""; read -p "Nhấn Enter để tiếp tục..."
+                            ;;
+                        *) print_error "Lựa chọn không hợp lệ!"; echo ""; read -p "Nhấn Enter để tiếp tục..." ;;
+                    esac
+                fi
+                ;;
             "beszel")
                 case $adv_choice in
                     1)
@@ -2250,6 +2518,12 @@ get_app_version() {
                     ver=$(docker exec "$app" cat /workspace/pyproject.toml 2>/dev/null | grep -E '^version\s*=' | head -n1 | cut -d'"' -f2)
                 fi
                 ;;
+            "zerotts")
+                ver=$(docker exec "$app" python3 -c "import zerotts; print(getattr(zerotts, '__version__', ''))" 2>/dev/null)
+                if [ -z "$ver" ]; then
+                    ver=$(docker exec "$app" cat /app/pyproject.toml 2>/dev/null | grep -E '^version\s*=' | head -n1 | cut -d'"' -f2)
+                fi
+                ;;
             "beszel")
                 ver=$(docker exec "$app" /beszel --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1)
                 ;;
@@ -2287,6 +2561,7 @@ manage_single_app() {
             "openclaw") display_name="OpenClaw" ;;
             "hermes") display_name="Hermes Agent" ;;
             "vieneu-tts") display_name="VieNeu-TTS" ;;
+            "zerotts") display_name="ZeroTTS" ;;
             "uptimekuma") display_name="Uptime Kuma" ;;
             "beszel") display_name="Beszel" ;;
             "nodejs") display_name="NodeJS" ;;
@@ -2384,6 +2659,16 @@ manage_single_app() {
                     fi
                     cd "$HOMELAB_DIR/vieneu-tts"
                     docker compose build
+                elif [ "$app_name" == "zerotts" ] && [ -d "$HOMELAB_DIR/zerotts/app/.git" ]; then
+                    echo "Đang kéo mã nguồn mới nhất của ZeroTTS từ GitHub..."
+                    cd "$HOMELAB_DIR/zerotts/app"
+                    git pull || true
+                    patch_zerotts_app "$HOMELAB_DIR/zerotts/app/webui/app.py"
+                    if ! grep -q "app.py" "$HOMELAB_DIR/zerotts/docker-compose.yml" 2>/dev/null; then
+                        sed -i '/output_audio/a \      - ./app/webui/app.py:/app/webui/app.py' "$HOMELAB_DIR/zerotts/docker-compose.yml" 2>/dev/null || true
+                    fi
+                    cd "$HOMELAB_DIR/zerotts"
+                    docker compose build
                 else
                     docker compose pull
                 fi
@@ -2419,6 +2704,8 @@ manage_single_app() {
                     rm -rf "$HOMELAB_DIR/$app_name"
                     if [ "$app_name" == "vieneu-tts" ]; then
                         docker rmi vieneu-tts:latest 2>/dev/null || true
+                    elif [ "$app_name" == "zerotts" ]; then
+                        docker rmi zerotts:latest 2>/dev/null || true
                     fi
                     local safe_app_upper=$(echo "$app_name" | tr '[:lower:]' '[:upper:]' | tr '-' '_')
                     sed -i "/^DOMAIN_${safe_app_upper}=/d" "$CONFIG_FILE"
@@ -2482,6 +2769,116 @@ manage_apps_menu() {
     done
 }
 
+tts_store_menu() {
+    while true; do
+        clear
+        local running_containers=$(docker ps --format '{{.Names}}' 2>/dev/null || echo "")
+        
+        local st_vie="[Chưa cài]"
+        if [ -f "$HOMELAB_DIR/vieneu-tts/docker-compose.yml" ]; then
+            if echo "$running_containers" | grep -qx "vieneu-tts"; then
+                st_vie="[${GREEN}Đang chạy${NC}]"
+            else
+                st_vie="[${RED}Đã dừng${NC}]"
+            fi
+        fi
+
+        local st_zero="[Chưa cài]"
+        if [ -f "$HOMELAB_DIR/zerotts/docker-compose.yml" ]; then
+            if echo "$running_containers" | grep -qx "zerotts"; then
+                st_zero="[${GREEN}Đang chạy${NC}]"
+            else
+                st_zero="[${RED}Đã dừng${NC}]"
+            fi
+        fi
+
+        print_section "Mô hình Text-to-Speech (TTS)"
+        echo -e "${GREEN} 1.${NC} VieNeu-TTS (TTS tiếng Việt & Clone giọng) $st_vie"
+        echo -e "${GREEN} 2.${NC} ZeroTTS (TTS tiếng Việt ONNX siêu tốc) $st_zero"
+        echo -e "${YELLOW} 0.${NC} Quay lại Cửa hàng ứng dụng"
+        echo ""
+        read -p "Nhập lựa chọn của bạn (0-2): " tts_choice
+
+        case $tts_choice in
+            1)
+                if [ -f "$HOMELAB_DIR/vieneu-tts/docker-compose.yml" ]; then
+                    manage_single_app "vieneu-tts"
+                    continue
+                fi
+                
+                read -r -d '' compose << 'EOF' || true
+services:
+  vieneu-tts:
+    image: vieneu-tts:latest
+    build:
+      context: ./app
+      dockerfile: docker/Dockerfile.cpu
+    container_name: vieneu-tts
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - HF_HOME=/home/app/.cache/huggingface
+      - PYTHONUNBUFFERED=1
+      - GRADIO_SERVER_PORT=7860
+      - GRADIO_SERVER_NAME=0.0.0.0
+      - GRADIO_SHARE=0
+    volumes:
+      - ./data/hf_cache:/home/app/.cache/huggingface
+      - ./data/output_audio:/workspace/output_audio
+      - ./data/user_voices:/home/app/.vieneu
+      - ./app/apps/gradio_main.py:/workspace/apps/gradio_main.py
+    networks:
+      - homelab_net
+networks:
+  homelab_net:
+    external: true
+EOF
+                install_app "vieneu-tts" "7860" "$compose"
+                ;;
+            2)
+                if [ -f "$HOMELAB_DIR/zerotts/docker-compose.yml" ]; then
+                    manage_single_app "zerotts"
+                    continue
+                fi
+                
+                read -r -d '' compose << 'EOF' || true
+services:
+  zerotts:
+    image: zerotts:latest
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: zerotts
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - HF_HOME=/app/data/hf_cache
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./data/hf_cache:/app/data/hf_cache
+      - ./data/output_audio:/app/outputs/generated
+      - ./app/webui/app.py:/app/webui/app.py
+    networks:
+      - homelab_net
+networks:
+  homelab_net:
+    external: true
+EOF
+                install_app "zerotts" "7861" "$compose"
+                ;;
+            0)
+                return
+                ;;
+            *)
+                print_error "Lựa chọn không hợp lệ!"
+                echo ""; read -p "Nhấn Enter để tiếp tục..."
+                ;;
+        esac
+    done
+}
+
 app_store_menu() {
     while true; do
         local running_containers=$(docker ps --format '{{.Names}}' 2>/dev/null || echo "")
@@ -2490,12 +2887,7 @@ app_store_menu() {
             local app=$1
             if [ -f "$HOMELAB_DIR/$app/docker-compose.yml" ]; then
                 if echo "$running_containers" | grep -qx "$app"; then
-                    local ver=$(get_app_version "$app")
-                    if [ -n "$ver" ]; then
-                        echo "[${GREEN}Đang chạy - $ver${NC}]"
-                    else
-                        echo "[${GREEN}Đang chạy${NC}]"
-                    fi
+                    echo "[${GREEN}Đang chạy${NC}]"
                 else
                     echo "[${RED}Đã dừng${NC}]"
                 fi
@@ -2511,7 +2903,14 @@ app_store_menu() {
         local st5=$(get_status "cliproxy")
         local st6=$(get_status "openclaw")
         local st7=$(get_status "hermes")
-        local st8=$(get_status "vieneu-tts")
+        local st_vie=$(get_status "vieneu-tts")
+        local st_zero=$(get_status "zerotts")
+        local st8="[Chưa cài]"
+        if [[ "$st_vie" == *"Đang chạy"* || "$st_zero" == *"Đang chạy"* ]]; then
+            st8="[${GREEN}Đang chạy${NC}]"
+        elif [[ "$st_vie" == *"Đã dừng"* || "$st_zero" == *"Đã dừng"* ]]; then
+            st8="[${RED}Đã dừng${NC}]"
+        fi
         local st9=$(get_status "uptimekuma")
         local st10=$(get_status "beszel")
         local st11=$(get_status "nodejs")
@@ -2533,7 +2932,7 @@ app_store_menu() {
         echo -e "${GREEN} 5.${NC} CLI Proxy API (Trạm trung chuyển & Quản lý API) $st5"
         echo -e "${GREEN} 6.${NC} OpenClaw (Trợ lý AI tự trị) $st6"
         echo -e "${GREEN} 7.${NC} Hermes Agent (Tác tử suy luận lõi) $st7"
-        echo -e "${GREEN} 8.${NC} VieNeu-TTS (TTS tiếng Việt & Clone giọng) $st8"
+        echo -e "${GREEN} 8.${NC} Text-to-Speech (AI Giọng nói tiếng Việt) $st8"
         
         echo -e "${BLUE} --- Nhóm Tiện ích & Quản trị Hệ thống ---${NC}"
         echo -e "${GREEN} 9.${NC} Uptime Kuma (Giám sát hệ thống) $st9"
@@ -2778,37 +3177,7 @@ EOF
                 ;;
 
             8)
-                if [ -f "$HOMELAB_DIR/vieneu-tts/docker-compose.yml" ]; then manage_single_app "vieneu-tts"; continue; fi
-                
-                read -r -d '' compose << 'EOF' || true
-services:
-  vieneu-tts:
-    image: vieneu-tts:latest
-    build:
-      context: ./app
-      dockerfile: docker/Dockerfile.cpu
-    container_name: vieneu-tts
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      - HF_HOME=/home/app/.cache/huggingface
-      - PYTHONUNBUFFERED=1
-      - GRADIO_SERVER_PORT=7860
-      - GRADIO_SERVER_NAME=0.0.0.0
-      - GRADIO_SHARE=0
-    volumes:
-      - ./data/hf_cache:/home/app/.cache/huggingface
-      - ./data/output_audio:/workspace/output_audio
-      - ./data/user_voices:/home/app/.vieneu
-      - ./app/apps/gradio_main.py:/workspace/apps/gradio_main.py
-    networks:
-      - homelab_net
-networks:
-  homelab_net:
-    external: true
-EOF
-                install_app "vieneu-tts" "7860" "$compose"
+                tts_store_menu
                 ;;
 
             9)
