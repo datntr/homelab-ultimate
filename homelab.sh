@@ -98,25 +98,47 @@ manage_docker_install() {
     print_section "Cài đặt / Cập nhật Docker"
     echo "Tiến hành xử lý hệ thống..."
     detect_os
+
     if [ "$OS" = "ubuntu" ] || [ "$OS" = "debian" ]; then
         apt-get update
         apt-get install -y ca-certificates curl openssl
         install -m 0755 -d /etc/apt/keyrings
-        curl -fsSL https://download.docker.com/linux/$OS/gpg -o /etc/apt/keyrings/docker.asc
-        chmod a+r /etc/apt/keyrings/docker.asc
+        curl -fsSL https://download.docker.com/linux/$OS/gpg -o /etc/apt/keyrings/docker.asc 2>/dev/null || true
+        chmod a+r /etc/apt/keyrings/docker.asc 2>/dev/null || true
         echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$OS $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
         apt-get update
         apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-    elif [ "$OS" = "almalinux" ] || [ "$OS" = "centos" ] || [ "$OS" = "rocky" ]; then
-        dnf install -y dnf-plugins-core openssl
-        dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-        dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    elif [ "$OS" = "almalinux" ] || [ "$OS" = "centos" ] || [ "$OS" = "rocky" ] || [ "$OS" = "fedora" ] || [ "$OS" = "rhel" ] || [ "$OS" = "ol" ]; then
+        local pkg_mgr="yum"
+        if command -v dnf &>/dev/null; then
+            pkg_mgr="dnf"
+        fi
+        $pkg_mgr install -y yum-utils dnf-plugins-core openssl curl 2>/dev/null || $pkg_mgr install -y yum-utils openssl curl 2>/dev/null || true
+        if [ "$pkg_mgr" = "dnf" ]; then
+            dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || true
+        else
+            yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null || true
+        fi
+        $pkg_mgr install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    fi
+
+    # Fallback tự động: nếu chưa có docker, dùng script cài đặt chính thức của Docker
+    if ! command -v docker &>/dev/null; then
+        echo "Đang thử phương thức cài đặt qua kịch bản chính thức của Docker (get.docker.com)..."
+        curl -fsSL https://get.docker.com -o /tmp/get-docker.sh 2>/dev/null && sh /tmp/get-docker.sh
+        rm -f /tmp/get-docker.sh
+    fi
+
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now docker 2>/dev/null || systemctl start docker 2>/dev/null || true
+
+    if command -v docker &>/dev/null; then
+        docker network inspect homelab_net &>/dev/null || docker network create homelab_net >/dev/null 2>&1
+        print_success "Thao tác cài đặt/cập nhật Docker thành công! ($(docker --version))"
     else
-        print_error "Hệ điều hành $OS chưa được hỗ trợ cài tự động."
+        print_error "Cài đặt Docker thất bại! Vui lòng kiểm tra lại kết nối mạng hoặc phiên bản hệ điều hành."
         return 1
     fi
-    systemctl enable --now docker
-    print_success "Thao tác cài đặt/cập nhật Docker thành công!"
 }
 
 docker_menu() {
